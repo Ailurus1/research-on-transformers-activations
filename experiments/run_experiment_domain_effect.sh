@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="${ROOT_DIR}/outputs/domain_effect"
 SUMMARY_CSV="${ROOT_DIR}/experiment_domain_effect.csv"
+BATCH_SIZE="${BATCH_SIZE:-1}"
 
 MAX_SAMPLES="${MAX_SAMPLES:-32}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
@@ -26,6 +27,6 @@ for domain in "${DOMAINS[@]}"; do
     --tasks "${domain}"
 done
 
-python3 aggregate_domain_effect_results.py
+python3 experiments/aggregate_domain_effect_results.py
 
 echo "DONE"
