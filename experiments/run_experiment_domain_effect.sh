@@ -22,7 +22,7 @@ for domain in "${DOMAINS[@]}"; do
   echo "Domain: ${domain}"
   python "${ROOT_DIR}/experiments/explore_domain_effect.py" \
     --max-samples "${MAX_SAMPLES}" \
-    --batch-size 1 \
+    --batch-size "${BATCH_SIZE}" \
     --log-level "${LOG_LEVEL}" \
     --tasks "${domain}"
 done
