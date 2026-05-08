@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Any
 
 import evaluate
 import torch
@@ -59,7 +59,7 @@ MODEL_GROUPS: Dict[str, List[str]] = {
 }
 
 
-TASKS = {
+TASKS: Dict[str, Dict[str, Any]] = {
     "text-classification": {
         "dataset": ("imdb", None),
         "text_col": "text",
@@ -108,15 +108,21 @@ def _device() -> torch.device:
 def evaluate_text_classification(
     model_id: str, max_samples: int, batch_size: int, out_dir: Path
 ) -> Dict:
-    task = TASKS["text-classification"]
+    task: Dict[str, Any] = TASKS["text-classification"]
     logger.info("Loading dataset for text classification: %s", task["dataset"][0])
-    ds = load_dataset(task["dataset"][0], task["dataset"][1], split=task["sample_split"])
-    ds = sample_dataset(ds, SampleConfig(split=task["sample_split"], max_samples=max_samples))
+    ds = load_dataset(
+        task["dataset"][0], task["dataset"][1], split=task["sample_split"]
+    )
+    ds = sample_dataset(
+        ds, SampleConfig(split=task["sample_split"], max_samples=max_samples)
+    )
 
     logger.info("Loading model/tokenizer: %s", model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForSequenceClassification.from_pretrained(model_id).to(_device())
-    model = AutoAnalyzer(model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer)
+    model = AutoAnalyzer(
+        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer
+    )
     metric = evaluate.load(task["metric"])
 
     texts = ds[task["text_col"]]
@@ -130,7 +136,9 @@ def evaluate_text_classification(
             desc=f"[text-classification] {model_id}",
             leave=False,
         ):
-            enc = tokenizer(batch_texts, padding=True, truncation=True, return_tensors="pt").to(_device())
+            enc = tokenizer(
+                batch_texts, padding=True, truncation=True, return_tensors="pt"
+            ).to(_device())
             logits = model(**enc).logits
             all_preds.extend(torch.argmax(logits, dim=-1).cpu().tolist())
 
@@ -141,15 +149,21 @@ def evaluate_text_classification(
 def evaluate_machine_translation(
     model_id: str, max_samples: int, batch_size: int, out_dir: Path
 ) -> Dict:
-    task = TASKS["machine-translation"]
+    task: Dict[str, Any] = TASKS["machine-translation"]
     logger.info("Loading dataset for translation: %s", task["dataset"][0])
-    ds = load_dataset(task["dataset"][0], task["dataset"][1], split=task["sample_split"])
-    ds = sample_dataset(ds, SampleConfig(split=task["sample_split"], max_samples=max_samples))
+    ds = load_dataset(
+        task["dataset"][0], task["dataset"][1], split=task["sample_split"]
+    )
+    ds = sample_dataset(
+        ds, SampleConfig(split=task["sample_split"], max_samples=max_samples)
+    )
 
     logger.info("Loading model/tokenizer: %s", model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_id).to(_device())
-    model = AutoAnalyzer(model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer)
+    model = AutoAnalyzer(
+        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer
+    )
     metric = evaluate.load(task["metric"])
 
     src_texts = ds[task["src_col"]]
@@ -163,7 +177,9 @@ def evaluate_machine_translation(
             desc=f"[machine-translation] {model_id}",
             leave=False,
         ):
-            enc = tokenizer(batch_texts, padding=True, truncation=True, return_tensors="pt").to(_device())
+            enc = tokenizer(
+                batch_texts, padding=True, truncation=True, return_tensors="pt"
+            ).to(_device())
             generated = model.generate(**enc, max_new_tokens=80)
             preds.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
 
@@ -174,7 +190,7 @@ def evaluate_machine_translation(
 def evaluate_text_generation(
     model_id: str, max_samples: int, batch_size: int, out_dir: Path
 ) -> Dict:
-    task = TASKS["text-generation"]
+    task: Dict[str, Any] = TASKS["text-generation"]
     logger.info("Loading dataset for generation: %s", task["dataset"][0])
     ds_stream = load_dataset(
         task["dataset"][0],
@@ -193,7 +209,9 @@ def evaluate_text_generation(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(model_id).to(_device())
-    model = AutoAnalyzer(model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer)
+    model = AutoAnalyzer(
+        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer
+    )
     model.eval()
 
     losses: List[float] = []
@@ -220,10 +238,14 @@ def evaluate_text_generation(
 def evaluate_image_classification(
     model_id: str, max_samples: int, batch_size: int, out_dir: Path
 ) -> Dict:
-    task = TASKS["image-classification"]
+    task: Dict[str, Any] = TASKS["image-classification"]
     logger.info("Loading dataset for image classification: %s", task["dataset"][0])
-    ds = load_dataset(task["dataset"][0], task["dataset"][1], split=task["sample_split"])
-    ds = sample_dataset(ds, SampleConfig(split=task["sample_split"], max_samples=max_samples))
+    ds = load_dataset(
+        task["dataset"][0], task["dataset"][1], split=task["sample_split"]
+    )
+    ds = sample_dataset(
+        ds, SampleConfig(split=task["sample_split"], max_samples=max_samples)
+    )
 
     logger.info("Loading model/feature extractor: %s", model_id)
     extractor = AutoFeatureExtractor.from_pretrained(model_id)
@@ -254,11 +276,17 @@ def evaluate_image_classification(
     return {"metric": task["metric"], "score": score}
 
 
-def evaluate_asr(model_id: str, max_samples: int, batch_size: int, out_dir: Path) -> Dict:
-    task = TASKS["automatic-speech-recognition"]
+def evaluate_asr(
+    model_id: str, max_samples: int, batch_size: int, out_dir: Path
+) -> Dict:
+    task: Dict[str, Any] = TASKS["automatic-speech-recognition"]
     logger.info("Loading dataset for ASR: %s", task["dataset"][0])
-    ds = load_dataset(task["dataset"][0], task["dataset"][1], split=task["sample_split"])
-    ds = sample_dataset(ds, SampleConfig(split=task["sample_split"], max_samples=max_samples))
+    ds = load_dataset(
+        task["dataset"][0], task["dataset"][1], split=task["sample_split"]
+    )
+    ds = sample_dataset(
+        ds, SampleConfig(split=task["sample_split"], max_samples=max_samples)
+    )
     metric = evaluate.load(task["metric"])
 
     predictions: List[str] = []
@@ -268,7 +296,12 @@ def evaluate_asr(model_id: str, max_samples: int, batch_size: int, out_dir: Path
         logger.info("Loading Whisper-style model: %s", model_id)
         processor = AutoProcessor.from_pretrained(model_id)
         model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id).to(_device())
-        model = AutoAnalyzer(model, dump_stats_path=str(out_dir / "acta"), tokenizer=processor.tokenizer, asr_chunk_labels=True)
+        model = AutoAnalyzer(
+            model,
+            dump_stats_path=str(out_dir / "acta"),
+            tokenizer=processor.tokenizer,
+            asr_chunk_labels=True,
+        )
         model.eval()
         with torch.no_grad():
             for audio in tqdm(
@@ -290,7 +323,12 @@ def evaluate_asr(model_id: str, max_samples: int, batch_size: int, out_dir: Path
         logger.info("Loading CTC-style model: %s", model_id)
         processor = AutoProcessor.from_pretrained(model_id)
         model = AutoModelForCTC.from_pretrained(model_id).to(_device())
-        model = AutoAnalyzer(model, dump_stats_path=str(out_dir / "acta"), tokenizer=None, asr_chunk_labels=True)
+        model = AutoAnalyzer(
+            model,
+            dump_stats_path=str(out_dir / "acta"),
+            tokenizer=None,
+            asr_chunk_labels=True,
+        )
         model.eval()
         with torch.no_grad():
             for audio in tqdm(
@@ -330,7 +368,11 @@ def run(args: argparse.Namespace) -> None:
     output_root = Path(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Starting domain sweep: max_samples=%d, output_dir=%s", args.max_samples, output_root)
+    logger.info(
+        "Starting domain sweep: max_samples=%d, output_dir=%s",
+        args.max_samples,
+        output_root,
+    )
     selected_domains = (
         list(MODEL_GROUPS.keys())
         if "all" in args.tasks
@@ -338,7 +380,12 @@ def run(args: argparse.Namespace) -> None:
     )
     logger.info("Selected domains: %s", ", ".join(selected_domains))
 
-    report = {"seed": args.seed, "max_samples": args.max_samples, "tasks": selected_domains, "results": {}}
+    report = {
+        "seed": args.seed,
+        "max_samples": args.max_samples,
+        "tasks": selected_domains,
+        "results": {},
+    }
     for domain in selected_domains:
         model_ids = MODEL_GROUPS[domain]
         logger.info("Domain: %s", domain)
@@ -354,7 +401,10 @@ def run(args: argparse.Namespace) -> None:
                 report["results"][domain][model_id] = {"status": "ok", **result}
                 logger.info("Completed model: %s", model_id)
             except Exception as exc:
-                report["results"][domain][model_id] = {"status": "failed", "error": str(exc)}
+                report["results"][domain][model_id] = {
+                    "status": "failed",
+                    "error": str(exc),
+                }
                 logger.exception("Model failed: %s", model_id)
 
             with open(run_dir / "result.json", "w", encoding="utf-8") as f:

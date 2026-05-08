@@ -24,7 +24,9 @@ for domain_dir in sorted(p for p in output_dir.iterdir() if p.is_dir()):
                             outlier_any = True
                             break
 
-        rows.append({"domain": domain, "model": model, "outliers": str(outlier_any).lower()})
+        rows.append(
+            {"domain": domain, "model": model, "outliers": str(outlier_any).lower()}
+        )
 
 with summary_path.open("w", encoding="utf-8", newline="") as f:
     writer = csv.DictWriter(f, fieldnames=["domain", "model", "outliers"])
