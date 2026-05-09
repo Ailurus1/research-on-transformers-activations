@@ -16,7 +16,7 @@ requires-python = ">=3.11"
 dependencies = [
   "acta @ git+https://github.com/Ailurus1/acta.git",
   "transformers>=4.40.0",
-  "datasets>=2.19.0",
+  "datasets<4.0.0",
   "evaluate>=0.4.0",
   "accelerate>=0.30.0",
   "scikit-learn>=1.4.0",
@@ -25,7 +25,10 @@ dependencies = [
   "tqdm>=4.66.0",
   "torchvision>=0.18.0",
   "torchaudio>=2.3.0",
-  "pre-commit"
+  "pre-commit",
+  "jiwer",
+  "librosa",
+  "soundfile"
 ]
 
 [tool.setuptools.packages.find]

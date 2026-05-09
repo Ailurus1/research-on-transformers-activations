@@ -7,12 +7,12 @@ OUTPUT_DIR="${ROOT_DIR}/outputs/domain_effect"
 SUMMARY_CSV="${ROOT_DIR}/experiment_domain_effect.csv"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 
-MAX_SAMPLES="${MAX_SAMPLES:-32}"
+MAX_SAMPLES="${MAX_SAMPLES:-64}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 DOMAINS=(
   "text-classification"
-  "machine-translation"
+#   "machine-translation"
   "text-generation"
   "image-classification"
   "automatic-speech-recognition"

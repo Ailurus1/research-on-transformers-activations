@@ -15,6 +15,7 @@ from datasets import load_dataset
 from tqdm.auto import tqdm
 from transformers import (
     AutoFeatureExtractor,
+    AutoImageProcessor,
     AutoModelForImageClassification,
     AutoModelForSeq2SeqLM,
     AutoModelForSequenceClassification,
@@ -38,23 +39,136 @@ MODEL_GROUPS: Dict[str, List[str]] = {
         "answerdotai/ModernBERT-base",
     ],
     "machine-translation": [
-        "google-t5/t5-small",
+        # "google-t5/t5-small",
         "google/mt5-small",
-        "facebook/bart-base",
+        "facebook/mbart-large-50-many-to-many-mmt",
     ],
     "text-generation": [
         "gpt2",
-        "google/gemma-2-2b-it",
+        # "google/gemma-2-2b-it",
         "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     ],
     "image-classification": [
         "google/vit-base-patch16-224",
-        "google/vit-base-patch32-224",
+        # "google/vit-base-patch32-224",
         "facebook/deit-tiny-patch16-224",
     ],
     "automatic-speech-recognition": [
         "openai/whisper-tiny",
         "facebook/wav2vec2-base-960h",
+    ],
+}
+
+TARGET_LAYER_PATTERNS = {
+    "distilbert/distilbert-base-uncased-finetuned-sst-2-english": [
+        "distilbert.transformer.layer.*.attention.q_lin",
+        "distilbert.transformer.layer.*.attention.k_lin",
+        "distilbert.transformer.layer.*.attention.v_lin",
+        "distilbert.transformer.layer.*.attention.out_lin",
+        "distilbert.transformer.layer.*.ffn.lin1",
+        "distilbert.transformer.layer.*.ffn.lin2",
+    ],
+    "albert/albert-base-v2": [
+        "albert.encoder.albert_layer_groups.*.albert_layers.*.attention.query",
+        "albert.encoder.albert_layer_groups.*.albert_layers.*.attention.key",
+        "albert.encoder.albert_layer_groups.*.albert_layers.*.attention.value",
+        "albert.encoder.albert_layer_groups.*.albert_layers.*.attention.dense",
+        "albert.encoder.albert_layer_groups.*.albert_layers.*.ffn",
+        "albert.encoder.albert_layer_groups.*.albert_layers.*.ffn_output",
+    ],
+    "google-bert/bert-base-uncased": [
+        "bert.encoder.layer.*.attention.self.query",
+        "bert.encoder.layer.*.attention.self.key",
+        "bert.encoder.layer.*.attention.self.value",
+        "bert.encoder.layer.*.attention.output.dense",
+        "bert.encoder.layer.*.intermediate.dense",
+        "bert.encoder.layer.*.output.dense",
+    ],
+    "answerdotai/ModernBERT-base": [
+        "model.layers.*.attn.Wqkv",
+        "model.layers.*.attn.Wo",
+        "model.layers.*.mlp.Wi",
+        "model.layers.*.mlp.Wo",
+    ],
+    "gpt2": [
+        "transformer.h.*.attn.c_attn",
+        "transformer.h.*.attn.c_proj",
+        "transformer.h.*.mlp.c_fc",
+        "transformer.h.*.mlp.c_proj",
+    ],
+    "google/gemma-2-2b-it": [
+        "model.layers.*.self_attn.q_proj",
+        "model.layers.*.self_attn.k_proj",
+        "model.layers.*.self_attn.v_proj",
+        "model.layers.*.self_attn.o_proj",
+        "model.layers.*.mlp.gate_proj",
+        "model.layers.*.mlp.up_proj",
+        "model.layers.*.mlp.down_proj",
+    ],
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0": [
+        "model.layers.*.self_attn.q_proj",
+        "model.layers.*.self_attn.k_proj",
+        "model.layers.*.self_attn.v_proj",
+        "model.layers.*.self_attn.o_proj",
+        "model.layers.*.mlp.gate_proj",
+        "model.layers.*.mlp.up_proj",
+        "model.layers.*.mlp.down_proj",
+    ],
+    "google/vit-base-patch16-224": [
+        "vit.encoder.layer.*.attention.attention.query",
+        "vit.encoder.layer.*.attention.attention.key",
+        "vit.encoder.layer.*.attention.attention.value",
+        "vit.encoder.layer.*.attention.output.dense",
+        "vit.encoder.layer.*.intermediate.dense",
+        "vit.encoder.layer.*.output.dense",
+    ],
+    "google/vit-base-patch32-224": [
+        "vit.encoder.layer.*.attention.attention.query",
+        "vit.encoder.layer.*.attention.attention.key",
+        "vit.encoder.layer.*.attention.attention.value",
+        "vit.encoder.layer.*.attention.output.dense",
+        "vit.encoder.layer.*.intermediate.dense",
+        "vit.encoder.layer.*.output.dense",
+    ],
+    "facebook/deit-tiny-patch16-224": [
+        "deit.encoder.layer.*.attention.attention.query",
+        "deit.encoder.layer.*.attention.attention.key",
+        "deit.encoder.layer.*.attention.attention.value",
+        "deit.encoder.layer.*.attention.output.dense",
+        "deit.encoder.layer.*.intermediate.dense",
+        "deit.encoder.layer.*.output.dense",
+        "vit.encoder.layer.*.attention.attention.query",
+        "vit.encoder.layer.*.attention.attention.key",
+        "vit.encoder.layer.*.attention.attention.value",
+        "vit.encoder.layer.*.attention.output.dense",
+        "vit.encoder.layer.*.intermediate.dense",
+        "vit.encoder.layer.*.output.dense",
+    ],
+    "openai/whisper-tiny": [
+        "model.encoder.layers.*.self_attn.q_proj",
+        "model.encoder.layers.*.self_attn.k_proj",
+        "model.encoder.layers.*.self_attn.v_proj",
+        "model.encoder.layers.*.self_attn.out_proj",
+        "model.encoder.layers.*.fc1",
+        "model.encoder.layers.*.fc2",
+        "model.decoder.layers.*.self_attn.q_proj",
+        "model.decoder.layers.*.self_attn.k_proj",
+        "model.decoder.layers.*.self_attn.v_proj",
+        "model.decoder.layers.*.self_attn.out_proj",
+        "model.decoder.layers.*.encoder_attn.q_proj",
+        "model.decoder.layers.*.encoder_attn.k_proj",
+        "model.decoder.layers.*.encoder_attn.v_proj",
+        "model.decoder.layers.*.encoder_attn.out_proj",
+        "model.decoder.layers.*.fc1",
+        "model.decoder.layers.*.fc2",
+    ],
+    "facebook/wav2vec2-base-960h": [
+        "wav2vec2.encoder.layers.*.attention.q_proj",
+        "wav2vec2.encoder.layers.*.attention.k_proj",
+        "wav2vec2.encoder.layers.*.attention.v_proj",
+        "wav2vec2.encoder.layers.*.attention.out_proj",
+        "wav2vec2.encoder.layers.*.feed_forward.intermediate_dense",
+        "wav2vec2.encoder.layers.*.feed_forward.output_dense",
     ],
 }
 
@@ -67,13 +181,13 @@ TASKS: Dict[str, Dict[str, Any]] = {
         "metric": "accuracy",
         "sample_split": "test",
     },
-    "machine-translation": {
-        "dataset": ("Muennighoff/flores200", "eng_Latn-deu_Latn"),
-        "src_col": "sentence_eng_Latn",
-        "tgt_col": "sentence_deu_Latn",
-        "metric": "sacrebleu",
-        "sample_split": "dev",
-    },
+    # "machine-translation": {
+    #     "dataset": ("Muennighoff/flores200", "eng_Latn-deu_Latn"),
+    #     "src_col": "sentence_eng_Latn",
+    #     "tgt_col": "sentence_deu_Latn",
+    #     "metric": "sacrebleu",
+    #     "sample_split": "dev",
+    # },
     "text-generation": {
         "dataset": ("allenai/c4", "en"),
         "text_col": "text",
@@ -81,11 +195,11 @@ TASKS: Dict[str, Dict[str, Any]] = {
         "sample_split": "validation",
     },
     "image-classification": {
-        "dataset": ("imagenet-1k", None),
-        "image_col": "image",
+        "dataset": ("cifar10", None),
+        "image_col": "img",
         "label_col": "label",
         "metric": "accuracy",
-        "sample_split": "validation",
+        "sample_split": "test",
     },
     "automatic-speech-recognition": {
         "dataset": ("librispeech_asr", "clean"),
@@ -111,7 +225,7 @@ def evaluate_text_classification(
     task: Dict[str, Any] = TASKS["text-classification"]
     logger.info("Loading dataset for text classification: %s", task["dataset"][0])
     ds = load_dataset(
-        task["dataset"][0], task["dataset"][1], split=task["sample_split"]
+        task["dataset"][0], task["dataset"][1], split=task["sample_split"], trust_remote_code=True
     )
     ds = sample_dataset(
         ds, SampleConfig(split=task["sample_split"], max_samples=max_samples)
@@ -121,7 +235,7 @@ def evaluate_text_classification(
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForSequenceClassification.from_pretrained(model_id).to(_device())
     model = AutoAnalyzer(
-        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer
+        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer, target_layers=TARGET_LAYER_PATTERNS[model_id]
     )
     metric = evaluate.load(task["metric"])
 
@@ -152,7 +266,7 @@ def evaluate_machine_translation(
     task: Dict[str, Any] = TASKS["machine-translation"]
     logger.info("Loading dataset for translation: %s", task["dataset"][0])
     ds = load_dataset(
-        task["dataset"][0], task["dataset"][1], split=task["sample_split"]
+        task["dataset"][0], task["dataset"][1], split=task["sample_split"], trust_remote_code=True
     )
     ds = sample_dataset(
         ds, SampleConfig(split=task["sample_split"], max_samples=max_samples)
@@ -162,7 +276,7 @@ def evaluate_machine_translation(
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_id).to(_device())
     model = AutoAnalyzer(
-        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer
+        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer, target_layers=TARGET_LAYER_PATTERNS[model_id]
     )
     metric = evaluate.load(task["metric"])
 
@@ -197,6 +311,7 @@ def evaluate_text_generation(
         task["dataset"][1],
         split=task["sample_split"],
         streaming=True,
+        trust_remote_code=True
     )
     texts = [
         row[task["text_col"]]
@@ -210,7 +325,7 @@ def evaluate_text_generation(
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(model_id).to(_device())
     model = AutoAnalyzer(
-        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer
+        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer, target_layers=TARGET_LAYER_PATTERNS[model_id]
     )
     model.eval()
 
@@ -241,20 +356,24 @@ def evaluate_image_classification(
     task: Dict[str, Any] = TASKS["image-classification"]
     logger.info("Loading dataset for image classification: %s", task["dataset"][0])
     ds = load_dataset(
-        task["dataset"][0], task["dataset"][1], split=task["sample_split"]
+        task["dataset"][0], task["dataset"][1], split=task["sample_split"], trust_remote_code=True
     )
     ds = sample_dataset(
         ds, SampleConfig(split=task["sample_split"], max_samples=max_samples)
     )
 
-    logger.info("Loading model/feature extractor: %s", model_id)
-    extractor = AutoFeatureExtractor.from_pretrained(model_id)
+    logger.info("Loading model/image processor: %s", model_id)
+    try:
+        processor = AutoImageProcessor.from_pretrained(model_id)
+    except Exception:
+        processor = AutoFeatureExtractor.from_pretrained(model_id)
     model = AutoModelForImageClassification.from_pretrained(model_id).to(_device())
     model = AutoAnalyzer(
         model,
         dump_stats_path=str(out_dir / "acta"),
         tokenizer=None,
         vit_reg_patch_labels=True,
+        target_layers=TARGET_LAYER_PATTERNS[model_id]
     )
     metric = evaluate.load(task["metric"])
 
@@ -268,7 +387,7 @@ def evaluate_image_classification(
             desc=f"[image-classification] {model_id}",
             leave=False,
         ):
-            inputs = extractor(images=batch, return_tensors="pt").to(_device())
+            inputs = processor(images=batch, return_tensors="pt").to(_device())
             logits = model(**inputs).logits
             preds.extend(torch.argmax(logits, dim=-1).cpu().tolist())
 
@@ -282,7 +401,7 @@ def evaluate_asr(
     task: Dict[str, Any] = TASKS["automatic-speech-recognition"]
     logger.info("Loading dataset for ASR: %s", task["dataset"][0])
     ds = load_dataset(
-        task["dataset"][0], task["dataset"][1], split=task["sample_split"]
+        task["dataset"][0], task["dataset"][1], split=task["sample_split"], trust_remote_code=True
     )
     ds = sample_dataset(
         ds, SampleConfig(split=task["sample_split"], max_samples=max_samples)
@@ -301,6 +420,7 @@ def evaluate_asr(
             dump_stats_path=str(out_dir / "acta"),
             tokenizer=processor.tokenizer,
             asr_chunk_labels=True,
+            target_layers=TARGET_LAYER_PATTERNS[model_id]
         )
         model.eval()
         with torch.no_grad():
@@ -328,6 +448,7 @@ def evaluate_asr(
             dump_stats_path=str(out_dir / "acta"),
             tokenizer=None,
             asr_chunk_labels=True,
+            target_layers=TARGET_LAYER_PATTERNS[model_id]
         )
         model.eval()
         with torch.no_grad():
@@ -352,7 +473,7 @@ def evaluate_asr(
 
 EVALUATORS: Dict[str, Callable[[str, int, int, Path], Dict]] = {
     "text-classification": evaluate_text_classification,
-    "machine-translation": evaluate_machine_translation,
+    # "machine-translation": evaluate_machine_translation,
     "text-generation": evaluate_text_generation,
     "image-classification": evaluate_image_classification,
     "automatic-speech-recognition": evaluate_asr,
