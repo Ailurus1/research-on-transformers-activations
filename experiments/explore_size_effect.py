@@ -116,9 +116,13 @@ def _release_memory() -> None:
         torch.mps.empty_cache()
 
 
-def _load_dataset_head(path: str, config: Optional[str], split_name: str, max_samples: int):
-    split_expr = f"{split_name}[:{max(1, max_samples)}]"
-    return load_dataset(path, config, split=split_expr, trust_remote_code=True)
+def _load_dataset_head(
+    path: str, config: Optional[str], split_name: str, max_samples: Optional[int]
+):
+    split_arg = (
+        split_name if max_samples is None else f"{split_name}[:{max(1, max_samples)}]"
+    )
+    return load_dataset(path, config, split=split_arg, trust_remote_code=True)
 
 
 def _iter_chunked(items: List[Any], batch_size: int) -> Iterable[List[Any]]:
@@ -178,7 +182,7 @@ def _replace_linear_with_fake_quant(module: nn.Module) -> None:
 def eval_masked_language_modeling(
     model: nn.Module,
     tokenizer: Any,
-    max_samples: int,
+    max_samples: Optional[int],
     batch_size: int,
     compute_device: torch.device,
 ) -> Dict[str, Any]:
@@ -227,25 +231,34 @@ def eval_masked_language_modeling(
 def eval_text_generation(
     model: nn.Module,
     tokenizer: Any,
-    max_samples: int,
+    max_samples: Optional[int],
     batch_size: int,
     compute_device: torch.device,
 ) -> Dict[str, Any]:
     task = TASKS["text-generation"]
-    ds_stream = load_dataset(
-        task["dataset"][0],
-        task["dataset"][1],
-        split=task["split"],
-        streaming=True,
-        trust_remote_code=True,
-    )
     texts: List[str] = []
-    for row in ds_stream:
-        t = row.get(task["text_col"])
-        if t:
-            texts.append(t)
-        if len(texts) >= max_samples:
-            break
+    if max_samples is None:
+        ds = load_dataset(
+            task["dataset"][0],
+            task["dataset"][1],
+            split=task["split"],
+            trust_remote_code=True,
+        )
+        texts = [row[task["text_col"]] for row in ds if row.get(task["text_col"])]
+    else:
+        ds_stream = load_dataset(
+            task["dataset"][0],
+            task["dataset"][1],
+            split=task["split"],
+            streaming=True,
+            trust_remote_code=True,
+        )
+        for row in ds_stream:
+            t = row.get(task["text_col"])
+            if t:
+                texts.append(t)
+            if len(texts) >= max_samples:
+                break
 
     losses: List[float] = []
     model.eval()
@@ -275,7 +288,7 @@ def eval_text_generation(
 def eval_image_classification(
     model: nn.Module,
     processor: Any,
-    max_samples: int,
+    max_samples: Optional[int],
     batch_size: int,
     compute_device: torch.device,
 ) -> Dict[str, Any]:
@@ -306,7 +319,7 @@ def eval_image_classification(
 def eval_asr(
     model: nn.Module,
     processor: Any,
-    max_samples: int,
+    max_samples: Optional[int],
     batch_size: int,
     compute_device: torch.device,
 ) -> Dict[str, Any]:
@@ -393,7 +406,7 @@ def _evaluate_once(
     domain: str,
     model_id: str,
     quantized: bool,
-    max_samples: int,
+    max_samples: Optional[int],
     batch_size: int,
     run_dir: Path,
 ) -> Dict[str, Any]:
@@ -443,7 +456,7 @@ def run(args: argparse.Namespace) -> None:
     selected_domains = list(SIZE_GROUPS.keys()) if "all" in args.tasks else args.tasks
     report: Dict[str, Any] = {
         "seed": args.seed,
-        "max_samples": args.max_samples,
+        "max_samples": args.max_samples if args.max_samples is not None else "full",
         "batch_size": batch_size,
         "tasks": selected_domains,
         "results": {},
@@ -488,7 +501,12 @@ def run(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Explore effect of model size + int8 quantization.")
-    parser.add_argument("--max-samples", type=int, default=32)
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Cap examples per task split; omit for the full split (can be large / memory-heavy).",
+    )
     parser.add_argument(
         "--batch-size",
         type=int,

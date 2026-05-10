@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import numpy as np
 import torch
@@ -12,7 +12,7 @@ from datasets import Dataset
 @dataclass
 class SampleConfig:
     split: str
-    max_samples: int
+    max_samples: Optional[int] = None
     seed: int = 42
 
 
@@ -25,6 +25,8 @@ def set_seed(seed: int) -> None:
 
 
 def sample_dataset(dataset: Dataset, config: SampleConfig) -> Dataset:
+    if config.max_samples is None:
+        return dataset
     sample_size = min(config.max_samples, len(dataset))
     if sample_size <= 0:
         return dataset.select([])

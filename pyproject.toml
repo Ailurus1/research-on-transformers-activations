@@ -28,7 +28,8 @@ dependencies = [
   "pre-commit",
   "jiwer",
   "librosa",
-  "soundfile"
+  "soundfile",
+  "matplotlib>=3.8.0",
 ]
 
 [tool.setuptools.packages.find]

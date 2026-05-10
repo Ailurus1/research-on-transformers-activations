@@ -220,10 +220,14 @@ def _device() -> torch.device:
 
 
 def evaluate_masked_language_modeling(
-    model_id: str, max_samples: int, batch_size: int, out_dir: Path
+    model_id: str, max_samples: Optional[int], batch_size: int, out_dir: Path
 ) -> Dict:
     task: Dict[str, Any] = TASKS["masked-language-modeling"]
-    split_expr = f"{task['sample_split']}[:{max(1, max_samples)}]"
+    split_expr = (
+        task["sample_split"]
+        if max_samples is None
+        else f"{task['sample_split']}[:{max(1, max_samples)}]"
+    )
     logger.info("Loading dataset for MLM: %s split=%s", task["dataset"][0], split_expr)
     ds = load_dataset(
         task["dataset"][0],
@@ -287,7 +291,7 @@ def evaluate_masked_language_modeling(
 
 
 def evaluate_machine_translation(
-    model_id: str, max_samples: int, batch_size: int, out_dir: Path
+    model_id: str, max_samples: Optional[int], batch_size: int, out_dir: Path
 ) -> Dict:
     task: Dict[str, Any] = TASKS["machine-translation"]
     logger.info("Loading dataset for translation: %s", task["dataset"][0])
@@ -328,22 +332,31 @@ def evaluate_machine_translation(
 
 
 def evaluate_text_generation(
-    model_id: str, max_samples: int, batch_size: int, out_dir: Path
+    model_id: str, max_samples: Optional[int], batch_size: int, out_dir: Path
 ) -> Dict:
     task: Dict[str, Any] = TASKS["text-generation"]
     logger.info("Loading dataset for generation: %s", task["dataset"][0])
-    ds_stream = load_dataset(
-        task["dataset"][0],
-        task["dataset"][1],
-        split=task["sample_split"],
-        streaming=True,
-        trust_remote_code=True
-    )
-    texts = [
-        row[task["text_col"]]
-        for row in itertools.islice(ds_stream, max_samples)
-        if row.get(task["text_col"])
-    ]
+    if max_samples is None:
+        ds = load_dataset(
+            task["dataset"][0],
+            task["dataset"][1],
+            split=task["sample_split"],
+            trust_remote_code=True,
+        )
+        texts = [row[task["text_col"]] for row in ds if row.get(task["text_col"])]
+    else:
+        ds_stream = load_dataset(
+            task["dataset"][0],
+            task["dataset"][1],
+            split=task["sample_split"],
+            streaming=True,
+            trust_remote_code=True,
+        )
+        texts = [
+            row[task["text_col"]]
+            for row in itertools.islice(ds_stream, max_samples)
+            if row.get(task["text_col"])
+        ]
 
     logger.info("Loading model/tokenizer: %s", model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -377,7 +390,7 @@ def evaluate_text_generation(
 
 
 def evaluate_image_classification(
-    model_id: str, max_samples: int, batch_size: int, out_dir: Path
+    model_id: str, max_samples: Optional[int], batch_size: int, out_dir: Path
 ) -> Dict:
     task: Dict[str, Any] = TASKS["image-classification"]
     logger.info("Loading dataset for image classification: %s", task["dataset"][0])
@@ -422,7 +435,7 @@ def evaluate_image_classification(
 
 
 def evaluate_asr(
-    model_id: str, max_samples: int, batch_size: int, out_dir: Path
+    model_id: str, max_samples: Optional[int], batch_size: int, out_dir: Path
 ) -> Dict:
     task: Dict[str, Any] = TASKS["automatic-speech-recognition"]
     logger.info("Loading dataset for ASR: %s", task["dataset"][0])
@@ -502,7 +515,7 @@ def evaluate_asr(
     return {"metric": task["metric"], "score": score}
 
 
-EVALUATORS: Dict[str, Callable[[str, int, int, Path], Dict]] = {
+EVALUATORS: Dict[str, Callable[[str, Optional[int], int, Path], Dict]] = {
     "masked-language-modeling": evaluate_masked_language_modeling,
     # "machine-translation": evaluate_machine_translation,
     "text-generation": evaluate_text_generation,
@@ -525,8 +538,8 @@ def run(args: argparse.Namespace) -> None:
         logger.warning("Forcing batch_size=1 (CLI had --batch-size=%d)", args.batch_size)
 
     logger.info(
-        "Starting domain sweep: max_samples=%d, output_dir=%s, batch_size=%d",
-        args.max_samples,
+        "Starting domain sweep: max_samples=%s, output_dir=%s, batch_size=%d",
+        args.max_samples if args.max_samples is not None else "full",
         output_root,
         batch_size,
     )
@@ -539,7 +552,7 @@ def run(args: argparse.Namespace) -> None:
 
     report = {
         "seed": args.seed,
-        "max_samples": args.max_samples,
+        "max_samples": args.max_samples if args.max_samples is not None else "full",
         "tasks": selected_domains,
         "results": {},
     }
@@ -573,7 +586,12 @@ def run(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max-samples", type=int, default=32)
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Cap examples per task split; omit for the full split (can be large / memory-heavy).",
+    )
     parser.add_argument(
         "--batch-size",
         type=int,
