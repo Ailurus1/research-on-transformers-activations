@@ -1,15 +1,3 @@
-"""
-Aggregate size-effect JSON results and plot metric vs parameter count per architecture family.
-
-Charts (two curves: full precision vs quantized INT8) live under::
-
-    <output-dir>/<domain>/<family>/metric_vs_params.png
-
-Aggregated JSON::
-
-    <output-dir>/aggregated_results.json
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -19,10 +7,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageClassification,
@@ -85,10 +70,6 @@ def load_result_json(path: Path) -> Optional[Dict[str, Any]]:
 def collect_series(
     output_dir: Path,
 ) -> Tuple[Dict[str, Any], Dict[Tuple[str, str], List[Dict[str, Any]]]]:
-    """
-    Returns (aggregated_tree, plot_groups) where plot_groups[(domain, family)] is a list of
-    dicts with keys model_id, n_params, metric_key, fp32_metric, quant_metric.
-    """
     aggregated: Dict[str, Any] = {"output_dir": str(output_dir.resolve()), "domains": {}}
     plot_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
 
@@ -277,7 +258,7 @@ def run(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser()
     p.add_argument(
         "--output-dir",
         type=str,
