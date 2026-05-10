@@ -160,16 +160,6 @@ TARGET_LAYER_PATTERNS = {
         "model.encoder.layers.*.self_attn.out_proj",
         "model.encoder.layers.*.fc1",
         "model.encoder.layers.*.fc2",
-        "model.decoder.layers.*.self_attn.q_proj",
-        "model.decoder.layers.*.self_attn.k_proj",
-        "model.decoder.layers.*.self_attn.v_proj",
-        "model.decoder.layers.*.self_attn.out_proj",
-        "model.decoder.layers.*.encoder_attn.q_proj",
-        "model.decoder.layers.*.encoder_attn.k_proj",
-        "model.decoder.layers.*.encoder_attn.v_proj",
-        "model.decoder.layers.*.encoder_attn.out_proj",
-        "model.decoder.layers.*.fc1",
-        "model.decoder.layers.*.fc2",
     ],
     "facebook/wav2vec2-base-960h": [
         "wav2vec2.encoder.layers.*.attention.q_proj",
@@ -471,7 +461,12 @@ def evaluate_asr(
                         sampling_rate=item["sampling_rate"],
                         return_tensors="pt",
                     ).to(_device())
-                    generated = model.generate(**inputs, max_new_tokens=96)
+                    generated = model.generate(
+                        **inputs,
+                        max_new_tokens=96,
+                        language="en",
+                        task="transcribe",
+                    )
                     predictions.append(
                         processor.batch_decode(generated, skip_special_tokens=True)[0]
                     )

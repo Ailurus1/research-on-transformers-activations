@@ -11,7 +11,6 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import evaluate
 import torch
-from acta import AutoAnalyzer
 from datasets import load_dataset
 from torch import nn
 from tqdm.auto import tqdm
@@ -117,12 +116,6 @@ def _release_memory() -> None:
         torch.mps.empty_cache()
 
 
-def _reset_acta_buffers(model: nn.Module) -> None:
-    reset = getattr(model, "reset_stats", None)
-    if callable(reset):
-        reset()
-
-
 def _load_dataset_head(path: str, config: Optional[str], split_name: str, max_samples: int):
     split_expr = f"{split_name}[:{max(1, max_samples)}]"
     return load_dataset(path, config, split=split_expr, trust_remote_code=True)
@@ -225,7 +218,6 @@ def eval_masked_language_modeling(
             out = model(**batch)
             losses.append(float(out.loss.item()))
             del batch, out
-            _reset_acta_buffers(model)
 
     avg_loss = sum(losses) / max(len(losses), 1)
     perplexity = math.exp(avg_loss) if avg_loss < 20 else float("inf")
@@ -274,7 +266,6 @@ def eval_text_generation(
             out = model(**enc, labels=enc["input_ids"])
             losses.append(float(out.loss.item()))
             del enc, out
-            _reset_acta_buffers(model)
 
     avg_nll = sum(losses) / max(len(losses), 1)
     perplexity = math.exp(avg_nll) if avg_nll < 20 else float("inf")
@@ -308,7 +299,6 @@ def eval_image_classification(
             out = model(**inp).logits
             preds.extend(torch.argmax(out, dim=-1).cpu().tolist())
             del inp, out
-            _reset_acta_buffers(model)
 
     return metric.compute(predictions=preds, references=refs)
 
@@ -343,7 +333,11 @@ def eval_asr(
                     return_tensors="pt",
                 ).to(compute_device)
                 if hasattr(model, "generate"):
-                    gen = model.generate(**inp, max_new_tokens=96)
+                    gen_kw: Dict[str, Any] = {"max_new_tokens": 96}
+                    if getattr(getattr(model, "config", None), "model_type", None) == "whisper":
+                        gen_kw["language"] = "en"
+                        gen_kw["task"] = "transcribe"
+                    gen = model.generate(**inp, **gen_kw)
                     preds.append(processor.batch_decode(gen, skip_special_tokens=True)[0])
                     del gen
                 else:
@@ -352,7 +346,6 @@ def eval_asr(
                     preds.extend(processor.batch_decode(pred_ids))
                     del logits, pred_ids
                 del inp
-                _reset_acta_buffers(model)
 
     return metric.compute(predictions=preds, references=refs)
 
@@ -405,11 +398,9 @@ def _evaluate_once(
     run_dir: Path,
 ) -> Dict[str, Any]:
     suffix = "int8_fake_static" if quantized else "fp32"
-    acta_dir = run_dir / suffix / "acta"
-    acta_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / suffix).mkdir(parents=True, exist_ok=True)
 
     model, processor, compute_device = _build_model_and_processor(domain, model_id, quantized)
-    model = AutoAnalyzer(model, dump_stats_path=str(acta_dir), tokenizer=getattr(processor, "tokenizer", processor))
 
     if domain == "masked-language-modeling":
         score = eval_masked_language_modeling(model, processor, max_samples, batch_size, compute_device)
