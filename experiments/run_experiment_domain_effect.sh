@@ -11,7 +11,7 @@ MAX_SAMPLES="${MAX_SAMPLES:-64}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 DOMAINS=(
-  "text-classification"
+  "masked-language-modeling"
 #   "machine-translation"
   "text-generation"
   "image-classification"

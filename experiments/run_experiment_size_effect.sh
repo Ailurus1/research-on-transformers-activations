@@ -8,7 +8,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 DOMAINS=(
-  "text-classification"
+  "masked-language-modeling"
   "text-generation"
   "image-classification"
   "automatic-speech-recognition"

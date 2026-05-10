@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import itertools
 import json
 import logging
 import math
 from pathlib import Path
-from typing import Callable, Dict, List, Any
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import evaluate
 import torch
@@ -16,12 +17,13 @@ from tqdm.auto import tqdm
 from transformers import (
     AutoFeatureExtractor,
     AutoImageProcessor,
-    AutoModelForImageClassification,
-    AutoModelForSeq2SeqLM,
-    AutoModelForSequenceClassification,
-    AutoModelForSpeechSeq2Seq,
-    AutoModelForCTC,
     AutoModelForCausalLM,
+    AutoModelForCTC,
+    AutoModelForImageClassification,
+    AutoModelForMaskedLM,
+    AutoModelForSeq2SeqLM,
+    AutoModelForSpeechSeq2Seq,
+    DataCollatorForLanguageModeling,
     AutoProcessor,
     AutoTokenizer,
 )
@@ -32,11 +34,10 @@ logger = logging.getLogger(__name__)
 
 
 MODEL_GROUPS: Dict[str, List[str]] = {
-    "text-classification": [
-        "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-        "albert/albert-base-v2",
+    "masked-language-modeling": [
         "google-bert/bert-base-uncased",
-        "answerdotai/ModernBERT-base",
+        "distilbert/distilbert-base-uncased",
+        "albert/albert-base-v2",
     ],
     "machine-translation": [
         # "google-t5/t5-small",
@@ -60,6 +61,14 @@ MODEL_GROUPS: Dict[str, List[str]] = {
 }
 
 TARGET_LAYER_PATTERNS = {
+    "distilbert/distilbert-base-uncased": [
+        "distilbert.transformer.layer.*.attention.q_lin",
+        "distilbert.transformer.layer.*.attention.k_lin",
+        "distilbert.transformer.layer.*.attention.v_lin",
+        "distilbert.transformer.layer.*.attention.out_lin",
+        "distilbert.transformer.layer.*.ffn.lin1",
+        "distilbert.transformer.layer.*.ffn.lin2",
+    ],
     "distilbert/distilbert-base-uncased-finetuned-sst-2-english": [
         "distilbert.transformer.layer.*.attention.q_lin",
         "distilbert.transformer.layer.*.attention.k_lin",
@@ -174,12 +183,13 @@ TARGET_LAYER_PATTERNS = {
 
 
 TASKS: Dict[str, Dict[str, Any]] = {
-    "text-classification": {
-        "dataset": ("imdb", None),
+    "masked-language-modeling": {
+        "dataset": ("wikitext", "wikitext-103-raw-v1"),
         "text_col": "text",
-        "label_col": "label",
-        "metric": "accuracy",
-        "sample_split": "test",
+        "sample_split": "validation",
+        "metric": "mlm_loss",
+        "max_length": 256,
+        "mlm_probability": 0.15,
     },
     # "machine-translation": {
     #     "dataset": ("Muennighoff/flores200", "eng_Latn-deu_Latn"),
@@ -219,45 +229,71 @@ def _device() -> torch.device:
     return torch.device("cpu")
 
 
-def evaluate_text_classification(
+def evaluate_masked_language_modeling(
     model_id: str, max_samples: int, batch_size: int, out_dir: Path
 ) -> Dict:
-    task: Dict[str, Any] = TASKS["text-classification"]
-    logger.info("Loading dataset for text classification: %s", task["dataset"][0])
+    task: Dict[str, Any] = TASKS["masked-language-modeling"]
+    split_expr = f"{task['sample_split']}[:{max(1, max_samples)}]"
+    logger.info("Loading dataset for MLM: %s split=%s", task["dataset"][0], split_expr)
     ds = load_dataset(
-        task["dataset"][0], task["dataset"][1], split=task["sample_split"], trust_remote_code=True
-    )
-    ds = sample_dataset(
-        ds, SampleConfig(split=task["sample_split"], max_samples=max_samples)
+        task["dataset"][0],
+        task["dataset"][1],
+        split=split_expr,
+        trust_remote_code=True,
     )
 
     logger.info("Loading model/tokenizer: %s", model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForSequenceClassification.from_pretrained(model_id).to(_device())
+    model = AutoModelForMaskedLM.from_pretrained(model_id).to(_device())
     model = AutoAnalyzer(
-        model, dump_stats_path=str(out_dir / "acta"), tokenizer=tokenizer, target_layers=TARGET_LAYER_PATTERNS[model_id]
+        model,
+        dump_stats_path=str(out_dir / "acta"),
+        tokenizer=tokenizer,
+        target_layers=TARGET_LAYER_PATTERNS[model_id],
     )
-    metric = evaluate.load(task["metric"])
+    collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=True,
+        mlm_probability=float(task["mlm_probability"]),
+    )
 
-    texts = ds[task["text_col"]]
-    labels = ds[task["label_col"]]
-    all_preds: List[int] = []
+    texts = [t for t in ds[task["text_col"]] if isinstance(t, str) and t.strip()]
+    if len(texts) < len(ds):
+        logger.debug("Filtered %d empty wikitext rows", len(ds) - len(texts))
+
+    losses: List[float] = []
     model.eval()
+    max_length = int(task["max_length"])
     batches = list(chunked(texts, batch_size=batch_size))
     with torch.no_grad():
         for batch_texts in tqdm(
             batches,
-            desc=f"[text-classification] {model_id}",
+            desc=f"[masked-language-modeling] {model_id}",
             leave=False,
         ):
-            enc = tokenizer(
-                batch_texts, padding=True, truncation=True, return_tensors="pt"
-            ).to(_device())
-            logits = model(**enc).logits
-            all_preds.extend(torch.argmax(logits, dim=-1).cpu().tolist())
+            features = []
+            for text in batch_texts:
+                enc = tokenizer(
+                    text,
+                    truncation=True,
+                    max_length=max_length,
+                    return_tensors="pt",
+                )
+                features.append(
+                    {"input_ids": enc["input_ids"][0], "attention_mask": enc["attention_mask"][0]}
+                )
+            batch = collator(features)
+            batch = {k: v.to(_device()) for k, v in batch.items()}
+            out = model(**batch)
+            losses.append(float(out.loss.item()))
+            del batch, out
 
-    score = metric.compute(predictions=all_preds, references=labels)
-    return {"metric": task["metric"], "score": score}
+    avg_loss = sum(losses) / max(len(losses), 1)
+    ppl = math.exp(avg_loss) if avg_loss < 20 else float("inf")
+    return {
+        "metric": task["metric"],
+        "score": {"mlm_loss": avg_loss, "perplexity": ppl},
+    }
 
 
 def evaluate_machine_translation(
@@ -472,7 +508,7 @@ def evaluate_asr(
 
 
 EVALUATORS: Dict[str, Callable[[str, int, int, Path], Dict]] = {
-    "text-classification": evaluate_text_classification,
+    "masked-language-modeling": evaluate_masked_language_modeling,
     # "machine-translation": evaluate_machine_translation,
     "text-generation": evaluate_text_generation,
     "image-classification": evaluate_image_classification,
@@ -489,10 +525,15 @@ def run(args: argparse.Namespace) -> None:
     output_root = Path(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
+    batch_size = 1
+    if args.batch_size != 1:
+        logger.warning("Forcing batch_size=1 (CLI had --batch-size=%d)", args.batch_size)
+
     logger.info(
-        "Starting domain sweep: max_samples=%d, output_dir=%s",
+        "Starting domain sweep: max_samples=%d, output_dir=%s, batch_size=%d",
         args.max_samples,
         output_root,
+        batch_size,
     )
     selected_domains = (
         list(MODEL_GROUPS.keys())
@@ -518,7 +559,7 @@ def run(args: argparse.Namespace) -> None:
             run_dir = output_root / domain / model_safe
             run_dir.mkdir(parents=True, exist_ok=True)
             try:
-                result = evaluator(model_id, args.max_samples, args.batch_size, run_dir)
+                result = evaluator(model_id, args.max_samples, batch_size, run_dir)
                 report["results"][domain][model_id] = {"status": "ok", **result}
                 logger.info("Completed model: %s", model_id)
             except Exception as exc:
@@ -538,7 +579,12 @@ def run(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-samples", type=int, default=32)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Ignored: batch size is always 1.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="outputs/domain_effect")
     parser.add_argument("--log-level", type=str, default="INFO")

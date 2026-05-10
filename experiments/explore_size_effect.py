@@ -21,8 +21,9 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForCTC,
     AutoModelForImageClassification,
-    AutoModelForSequenceClassification,
+    AutoModelForMaskedLM,
     AutoModelForSpeechSeq2Seq,
+    DataCollatorForLanguageModeling,
     AutoProcessor,
     AutoTokenizer,
 )
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 SIZE_GROUPS: Dict[str, Dict[str, List[str]]] = {
-    "text-classification": {
+    "masked-language-modeling": {
         "albert": [
             "albert/albert-base-v2",
             "albert/albert-large-v2",
@@ -65,12 +66,13 @@ SIZE_GROUPS: Dict[str, Dict[str, List[str]]] = {
 
 
 TASKS: Dict[str, Dict[str, Any]] = {
-    "text-classification": {
-        "dataset": ("imdb", None),
-        "split": "test",
+    "masked-language-modeling": {
+        "dataset": ("wikitext", "wikitext-103-raw-v1"),
+        "split": "validation",
         "text_col": "text",
-        "label_col": "label",
-        "metric": "accuracy",
+        "metric": "mlm_loss",
+        "max_length": 256,
+        "mlm_probability": 0.15,
     },
     "text-generation": {
         "dataset": ("allenai/c4", "en"),
@@ -180,36 +182,54 @@ def _replace_linear_with_fake_quant(module: nn.Module) -> None:
             _replace_linear_with_fake_quant(child)
 
 
-def eval_text_classification(
+def eval_masked_language_modeling(
     model: nn.Module,
     tokenizer: Any,
     max_samples: int,
     batch_size: int,
     compute_device: torch.device,
 ) -> Dict[str, Any]:
-    task = TASKS["text-classification"]
+    task = TASKS["masked-language-modeling"]
     ds = _load_dataset_head(task["dataset"][0], task["dataset"][1], task["split"], max_samples)
-    metric = evaluate.load(task["metric"])
+    texts = [t for t in ds[task["text_col"]] if isinstance(t, str) and t.strip()]
 
-    texts = ds[task["text_col"]]
-    labels = ds[task["label_col"]]
-    preds: List[int] = []
+    collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=True,
+        mlm_probability=float(task["mlm_probability"]),
+    )
+    max_length = int(task["max_length"])
+    losses: List[float] = []
 
     model.eval()
     with torch.no_grad():
         for batch_texts in tqdm(
             _iter_chunked(texts, batch_size),
             total=math.ceil(len(texts) / batch_size),
-            desc="text-classification",
+            desc="masked-language-modeling",
             leave=False,
         ):
-            enc = tokenizer(batch_texts, padding=True, truncation=True, return_tensors="pt").to(compute_device)
-            out = model(**enc).logits
-            preds.extend(torch.argmax(out, dim=-1).cpu().tolist())
-            del enc, out
+            features = []
+            for text in batch_texts:
+                enc = tokenizer(
+                    text,
+                    truncation=True,
+                    max_length=max_length,
+                    return_tensors="pt",
+                )
+                features.append(
+                    {"input_ids": enc["input_ids"][0], "attention_mask": enc["attention_mask"][0]}
+                )
+            batch = collator(features)
+            batch = {k: v.to(compute_device) for k, v in batch.items()}
+            out = model(**batch)
+            losses.append(float(out.loss.item()))
+            del batch, out
             _reset_acta_buffers(model)
 
-    return metric.compute(predictions=preds, references=labels)
+    avg_loss = sum(losses) / max(len(losses), 1)
+    perplexity = math.exp(avg_loss) if avg_loss < 20 else float("inf")
+    return {"mlm_loss": avg_loss, "perplexity": perplexity}
 
 
 def eval_text_generation(
@@ -340,9 +360,9 @@ def eval_asr(
 def _build_model_and_processor(domain: str, model_id: str, quantized: bool):
     base_device = _device()
 
-    if domain == "text-classification":
+    if domain == "masked-language-modeling":
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForSequenceClassification.from_pretrained(model_id, **_model_load_kwargs())
+        model = AutoModelForMaskedLM.from_pretrained(model_id, **_model_load_kwargs())
         processor = tokenizer
     elif domain == "text-generation":
         tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -391,8 +411,8 @@ def _evaluate_once(
     model, processor, compute_device = _build_model_and_processor(domain, model_id, quantized)
     model = AutoAnalyzer(model, dump_stats_path=str(acta_dir), tokenizer=getattr(processor, "tokenizer", processor))
 
-    if domain == "text-classification":
-        score = eval_text_classification(model, processor, max_samples, batch_size, compute_device)
+    if domain == "masked-language-modeling":
+        score = eval_masked_language_modeling(model, processor, max_samples, batch_size, compute_device)
         metric_name = TASKS[domain]["metric"]
     elif domain == "text-generation":
         score = eval_text_generation(model, processor, max_samples, batch_size, compute_device)
@@ -425,11 +445,15 @@ def run(args: argparse.Namespace) -> None:
     output_root = Path(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
+    batch_size = 1
+    if args.batch_size != 1:
+        logger.warning("Forcing batch_size=1 (CLI had --batch-size=%d)", args.batch_size)
+
     selected_domains = list(SIZE_GROUPS.keys()) if "all" in args.tasks else args.tasks
     report: Dict[str, Any] = {
         "seed": args.seed,
         "max_samples": args.max_samples,
-        "batch_size": args.batch_size,
+        "batch_size": batch_size,
         "tasks": selected_domains,
         "results": {},
     }
@@ -454,7 +478,7 @@ def run(args: argparse.Namespace) -> None:
                             model_id=model_id,
                             quantized=quantized,
                             max_samples=args.max_samples,
-                            batch_size=args.batch_size,
+                            batch_size=batch_size,
                             run_dir=run_dir,
                         )
                     except Exception as exc:
@@ -474,7 +498,12 @@ def run(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Explore effect of model size + int8 quantization.")
     parser.add_argument("--max-samples", type=int, default=32)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Ignored: batch size is always 1.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="outputs/size_effect")
     parser.add_argument("--log-level", type=str, default="INFO")
