@@ -34,15 +34,17 @@ logger = logging.getLogger(__name__)
 
 SIZE_GROUPS: Dict[str, Dict[str, List[str]]] = {
     "text-classification": {
-        "bert": [
-            "google-bert/bert-base-uncased",
-            "google-bert/bert-large-uncased",
+        "albert": [
+            "albert/albert-base-v2",
+            "albert/albert-large-v2",
+            "albert/albert-xlarge-v2",
         ]
     },
     "text-generation": {
         "gpt2": [
             "gpt2",
             "gpt2-medium",
+            "gpt2-large",
         ]
     },
     "image-classification": {
@@ -56,6 +58,7 @@ SIZE_GROUPS: Dict[str, Dict[str, List[str]]] = {
         "whisper": [
             "openai/whisper-tiny",
             "openai/whisper-base",
+            "openai/whisper-small",
         ]
     },
 }
