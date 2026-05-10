@@ -7,7 +7,10 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageClassification,
@@ -235,12 +238,10 @@ def plot_family(
     return out_path
 
 
-def run(args: argparse.Namespace) -> None:
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper()),
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-    root = Path(args.output_dir).resolve()
+def aggregate_size_effect_results(output_dir: Path) -> None:
+    root = output_dir.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+
     aggregated, plot_groups = collect_series(root)
 
     chart_paths: Dict[str, str] = {}
@@ -255,6 +256,14 @@ def run(args: argparse.Namespace) -> None:
     with agg_path.open("w", encoding="utf-8") as f:
         json.dump(aggregated, f, indent=2)
     logger.info("Wrote %s", agg_path)
+
+
+def run(args: argparse.Namespace) -> None:
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
+    aggregate_size_effect_results(Path(args.output_dir))
 
 
 def parse_args() -> argparse.Namespace:

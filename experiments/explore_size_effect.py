@@ -27,6 +27,7 @@ from transformers import (
     AutoTokenizer,
 )
 
+from experiments.aggregate_size_effect_results import aggregate_size_effect_results
 from experiments.utils import set_seed
 
 logger = logging.getLogger(__name__)
@@ -497,6 +498,13 @@ def run(args: argparse.Namespace) -> None:
 
     with open(output_root / "summary.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+
+    try:
+        aggregate_size_effect_results(output_root.resolve())
+    except Exception:
+        logger.exception(
+            "aggregate_size_effect_results failed (summary.json is still valid)"
+        )
 
 
 def parse_args() -> argparse.Namespace:
