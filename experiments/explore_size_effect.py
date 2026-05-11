@@ -127,6 +127,49 @@ def _iter_chunked(items: List[Any], batch_size: int) -> Iterable[List[Any]]:
         yield items[i : i + batch_size]
 
 
+def _mlm_token_windows_from_texts(
+    tokenizer: Any,
+    texts: Iterable[str],
+    max_length: int,
+    min_tail_tokens: int = 32,
+) -> List[Dict[str, List[int]]]:
+    """Merge WikiText lines into fixed-length windows so MLM masking almost always has targets.
+
+    PyTorch cross-entropy returns NaN when every label is ``ignore_index`` (-100). With
+    ``batch_size=1`` and many very short rows, ``DataCollatorForLanguageModeling`` can mask
+    zero tokens, leaving no supervised positions.
+    """
+    n_special = int(tokenizer.num_special_tokens_to_add(pair=False))
+    core_budget = max(1, int(max_length) - n_special)
+    buffer: List[int] = []
+    windows: List[Dict[str, List[int]]] = []
+
+    for text in texts:
+        if not isinstance(text, str) or not text.strip():
+            continue
+        enc = tokenizer(text, add_special_tokens=False, truncation=False)
+        ids = enc.get("input_ids") or []
+        if not ids:
+            continue
+        buffer.extend(ids)
+        while len(buffer) >= core_budget:
+            core = buffer[:core_budget]
+            buffer = buffer[core_budget:]
+            packed = tokenizer.build_inputs_with_special_tokens(core)
+            if len(packed) > max_length:
+                packed = packed[:max_length]
+            windows.append({"input_ids": packed, "attention_mask": [1] * len(packed)})
+
+    if len(buffer) >= min_tail_tokens:
+        packed = tokenizer.build_inputs_with_special_tokens(buffer)
+        buffer.clear()
+        if len(packed) > max_length:
+            packed = packed[:max_length]
+        windows.append({"input_ids": packed, "attention_mask": [1] * len(packed)})
+
+    return windows
+
+
 def _quantize_linear_asymmetric_int8(model: nn.Module) -> nn.Module:
     qmodel = copy.deepcopy(model)
     _replace_linear_with_fake_quant(qmodel)
@@ -193,34 +236,44 @@ def eval_masked_language_modeling(
         mlm_probability=float(task["mlm_probability"]),
     )
     max_length = int(task["max_length"])
+    windows = _mlm_token_windows_from_texts(tokenizer, texts, max_length)
+    if not windows:
+        raise RuntimeError(
+            "No MLM windows built from WikiText (empty split, wrong column, or tokenizer issue)."
+        )
+
     losses: List[float] = []
 
     model.eval()
     with torch.no_grad():
-        for batch_texts in tqdm(
-            _iter_chunked(texts, batch_size),
-            total=math.ceil(len(texts) / batch_size),
+        for window_batch in tqdm(
+            _iter_chunked(windows, batch_size),
+            total=math.ceil(len(windows) / batch_size),
             desc="masked-language-modeling",
             leave=False,
         ):
             features = []
-            for text in batch_texts:
-                enc = tokenizer(
-                    text,
-                    truncation=True,
-                    max_length=max_length,
-                    return_tensors="pt",
-                )
+            for w in window_batch:
                 features.append(
-                    {"input_ids": enc["input_ids"][0], "attention_mask": enc["attention_mask"][0]}
+                    {
+                        "input_ids": torch.tensor(w["input_ids"], dtype=torch.long),
+                        "attention_mask": torch.tensor(w["attention_mask"], dtype=torch.long),
+                    }
                 )
             batch = collator(features)
             batch = {k: v.to(compute_device) for k, v in batch.items()}
             out = model(**batch)
-            losses.append(float(out.loss.item()))
+            loss_v = float(out.loss.item())
+            if math.isfinite(loss_v):
+                losses.append(loss_v)
+            else:
+                logger.warning("Skipping non-finite MLM loss for one batch (no masked labels).")
             del batch, out
 
-    avg_loss = sum(losses) / max(len(losses), 1)
+    if not losses:
+        raise RuntimeError("All MLM batches produced non-finite loss; try lowering mlm_probability.")
+
+    avg_loss = sum(losses) / len(losses)
     perplexity = math.exp(avg_loss) if avg_loss < 20 else float("inf")
     return {"mlm_loss": avg_loss, "perplexity": perplexity}
 
