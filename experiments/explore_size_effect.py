@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import gc
 import json
 import logging
 import math
@@ -28,6 +27,11 @@ from transformers import (
 )
 
 from experiments.aggregate_size_effect_results import aggregate_size_effect_results
+from experiments.cache_cleanup import (
+    clear_hf_dataset_cache,
+    release_memory,
+    remove_hf_hub_model_cache,
+)
 from experiments.utils import set_seed
 
 logger = logging.getLogger(__name__)
@@ -107,14 +111,6 @@ def _device() -> torch.device:
 
 def _model_load_kwargs() -> Dict[str, Any]:
     return {"low_cpu_mem_usage": True}
-
-
-def _release_memory() -> None:
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    if torch.backends.mps.is_available() and hasattr(torch.mps, "empty_cache"):
-        torch.mps.empty_cache()
 
 
 def _load_dataset_head(
@@ -490,11 +486,18 @@ def run(args: argparse.Namespace) -> None:
                         result = {"status": "failed", "precision": precision, "error": str(exc)}
                         logger.exception("Failed: %s (%s)", model_id, precision)
                     finally:
-                        _release_memory()
+                        release_memory()
 
                     report["results"][domain][family][model_id][precision] = result
                     with open(run_dir / f"{precision}_result.json", "w", encoding="utf-8") as f:
                         json.dump(result, f, indent=2)
+
+                remove_hf_hub_model_cache(model_id)
+                release_memory()
+
+        ds_spec = TASKS[domain]["dataset"]
+        clear_hf_dataset_cache(ds_spec[0], ds_spec[1])
+        release_memory()
 
     with open(output_root / "summary.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

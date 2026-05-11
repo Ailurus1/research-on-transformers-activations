@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageClassification,

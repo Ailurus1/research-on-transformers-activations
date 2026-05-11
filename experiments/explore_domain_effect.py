@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import gc
 import itertools
 import json
 import logging
@@ -28,6 +27,11 @@ from transformers import (
     AutoTokenizer,
 )
 
+from experiments.cache_cleanup import (
+    clear_hf_dataset_cache,
+    release_memory,
+    remove_hf_hub_model_cache,
+)
 from experiments.utils import SampleConfig, chunked, sample_dataset, set_seed
 
 logger = logging.getLogger(__name__)
@@ -576,9 +580,18 @@ def run(args: argparse.Namespace) -> None:
                     "error": str(exc),
                 }
                 logger.exception("Model failed: %s", model_id)
+            finally:
+                remove_hf_hub_model_cache(model_id)
+                release_memory()
 
             with open(run_dir / "result.json", "w", encoding="utf-8") as f:
                 json.dump(report["results"][domain][model_id], f, indent=2)
+
+        task_cfg = TASKS.get(domain)
+        if task_cfg and "dataset" in task_cfg:
+            ds_spec = task_cfg["dataset"]
+            clear_hf_dataset_cache(ds_spec[0], ds_spec[1])
+        release_memory()
 
     with open(output_root / "summary.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
