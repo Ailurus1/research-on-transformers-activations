@@ -127,6 +127,20 @@ def _iter_chunked(items: List[Any], batch_size: int) -> Iterable[List[Any]]:
         yield items[i : i + batch_size]
 
 
+def _wrap_mlm_core_ids(tokenizer: Any, core: List[int]) -> List[int]:
+    cls_id = getattr(tokenizer, "cls_token_id", None)
+    sep_id = getattr(tokenizer, "sep_token_id", None)
+    if cls_id is not None and sep_id is not None:
+        return [cls_id] + list(core) + [sep_id]
+    bos_id = getattr(tokenizer, "bos_token_id", None)
+    eos_id = getattr(tokenizer, "eos_token_id", None)
+    if bos_id is not None and eos_id is not None:
+        return [bos_id] + list(core) + [eos_id]
+    if bos_id is not None:
+        return [bos_id] + list(core)
+    return list(core)
+
+
 def _mlm_token_windows_from_texts(
     tokenizer: Any,
     texts: Iterable[str],
@@ -139,7 +153,7 @@ def _mlm_token_windows_from_texts(
     ``batch_size=1`` and many very short rows, ``DataCollatorForLanguageModeling`` can mask
     zero tokens, leaving no supervised positions.
     """
-    n_special = int(tokenizer.num_special_tokens_to_add(pair=False))
+    n_special = len(_wrap_mlm_core_ids(tokenizer, []))
     core_budget = max(1, int(max_length) - n_special)
     buffer: List[int] = []
     windows: List[Dict[str, List[int]]] = []
@@ -155,13 +169,13 @@ def _mlm_token_windows_from_texts(
         while len(buffer) >= core_budget:
             core = buffer[:core_budget]
             buffer = buffer[core_budget:]
-            packed = tokenizer.build_inputs_with_special_tokens(core)
+            packed = _wrap_mlm_core_ids(tokenizer, core)
             if len(packed) > max_length:
                 packed = packed[:max_length]
             windows.append({"input_ids": packed, "attention_mask": [1] * len(packed)})
 
     if len(buffer) >= min_tail_tokens:
-        packed = tokenizer.build_inputs_with_special_tokens(buffer)
+        packed = _wrap_mlm_core_ids(tokenizer, buffer)
         buffer.clear()
         if len(packed) > max_length:
             packed = packed[:max_length]
