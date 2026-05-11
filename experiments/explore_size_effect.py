@@ -43,6 +43,7 @@ SIZE_GROUPS: Dict[str, Dict[str, List[str]]] = {
             "albert/albert-base-v2",
             "albert/albert-large-v2",
             "albert/albert-xlarge-v2",
+            "albert/albert-xxlarge-v2",
         ]
     },
     "text-generation": {
@@ -50,6 +51,7 @@ SIZE_GROUPS: Dict[str, Dict[str, List[str]]] = {
             "gpt2",
             "gpt2-medium",
             "gpt2-large",
+            "gpt2-xl",
         ]
     },
     "image-classification": {
@@ -57,6 +59,7 @@ SIZE_GROUPS: Dict[str, Dict[str, List[str]]] = {
             "facebook/deit-tiny-patch16-224",
             "facebook/deit-small-patch16-224",
             "facebook/deit-base-patch16-224",
+            "facebook/deit-large-patch16-224",
         ]
     },
     "automatic-speech-recognition": {
@@ -64,6 +67,7 @@ SIZE_GROUPS: Dict[str, Dict[str, List[str]]] = {
             "openai/whisper-tiny",
             "openai/whisper-base",
             "openai/whisper-small",
+            "openai/whisper-large",
         ]
     },
 }
