@@ -499,15 +499,18 @@ def run(args: argparse.Namespace) -> None:
         clear_hf_dataset_cache(ds_spec[0], ds_spec[1])
         release_memory()
 
-    with open(output_root / "summary.json", "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+        with open(output_root / "summary.json", "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
 
-    try:
-        aggregate_size_effect_results(output_root.resolve())
-    except Exception:
-        logger.exception(
-            "aggregate_size_effect_results failed (summary.json is still valid)"
-        )
+        if not args.skip_aggregation:
+            try:
+                aggregate_size_effect_results(output_root.resolve())
+                logger.info("Plots and aggregated_results.json updated after domain=%s", domain)
+            except Exception:
+                logger.exception(
+                    "aggregate_size_effect_results failed after domain=%s (summary.json is still valid)",
+                    domain,
+                )
 
 
 def parse_args() -> argparse.Namespace:
@@ -527,6 +530,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="outputs/size_effect")
     parser.add_argument("--log-level", type=str, default="INFO")
+    parser.add_argument(
+        "--skip-aggregation",
+        action="store_true",
+        help="Do not build plots or aggregated_results.json after each domain.",
+    )
     parser.add_argument(
         "--tasks",
         nargs="+",
