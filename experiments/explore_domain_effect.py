@@ -32,7 +32,13 @@ from experiments.cache_cleanup import (
     release_memory,
     remove_hf_hub_model_cache,
 )
-from experiments.utils import SampleConfig, chunked, sample_dataset, set_seed
+from experiments.utils import (
+    SampleConfig,
+    chunked,
+    image_classification_metric_labels,
+    sample_dataset,
+    set_seed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,17 +199,17 @@ TASKS: Dict[str, Dict[str, Any]] = {
     #     "sample_split": "dev",
     # },
     "text-generation": {
-        "dataset": ("allenai/c4", "en"),
+        "dataset": ("wikitext", "wikitext-103-raw-v1"),
         "text_col": "text",
         "metric": "perplexity",
         "sample_split": "validation",
     },
     "image-classification": {
-        "dataset": ("cifar10", None),
-        "image_col": "img",
+        "dataset": ("ILSVRC/imagenet-1k", None),
+        "image_col": "image",
         "label_col": "label",
         "metric": "accuracy",
-        "sample_split": "test",
+        "sample_split": "validation",
     },
     "automatic-speech-recognition": {
         "dataset": ("librispeech_asr", "clean"),
@@ -410,18 +416,21 @@ def evaluate_image_classification(
         processor = AutoImageProcessor.from_pretrained(model_id)
     except Exception:
         processor = AutoFeatureExtractor.from_pretrained(model_id)
-    model = AutoModelForImageClassification.from_pretrained(model_id).to(_device())
+    hf_model = AutoModelForImageClassification.from_pretrained(model_id).to(_device())
+    id_cfg = hf_model.config
     model = AutoAnalyzer(
-        model,
+        hf_model,
         dump_stats_path=str(out_dir / "acta"),
         tokenizer=None,
         vit_reg_patch_labels=True,
-        target_layers=TARGET_LAYER_PATTERNS[model_id]
+        target_layers=TARGET_LAYER_PATTERNS[model_id],
     )
     metric = evaluate.load(task["metric"])
 
     preds: List[int] = []
     refs = ds[task["label_col"]]
+    label_feature = ds.features.get(task["label_col"])
+    refs_for_metric = image_classification_metric_labels(refs, label_feature, id_cfg)
     model.eval()
     batches = list(chunked(ds[task["image_col"]], batch_size=batch_size))
     with torch.no_grad():
@@ -434,7 +443,7 @@ def evaluate_image_classification(
             logits = model(**inputs).logits
             preds.extend(torch.argmax(logits, dim=-1).cpu().tolist())
 
-    score = metric.compute(predictions=preds, references=refs)
+    score = metric.compute(predictions=preds, references=refs_for_metric)
     return {"metric": task["metric"], "score": score}
 
 

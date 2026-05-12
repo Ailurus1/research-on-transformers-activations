@@ -32,7 +32,7 @@ from experiments.cache_cleanup import (
     release_memory,
     remove_hf_hub_model_cache,
 )
-from experiments.utils import set_seed
+from experiments.utils import image_classification_metric_labels, set_seed
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +83,15 @@ TASKS: Dict[str, Dict[str, Any]] = {
         "mlm_probability": 0.15,
     },
     "text-generation": {
-        "dataset": ("allenai/c4", "en"),
+        "dataset": ("wikitext", "wikitext-103-raw-v1"),
         "split": "validation",
         "text_col": "text",
         "metric": "perplexity",
     },
     "image-classification": {
-        "dataset": ("cifar10", None),
-        "split": "test",
-        "image_col": "img",
+        "dataset": ("ILSVRC/imagenet-1k", None),
+        "split": "validation",
+        "image_col": "image",
         "label_col": "label",
         "metric": "accuracy",
     },
@@ -366,6 +366,8 @@ def eval_image_classification(
 
     images = ds[task["image_col"]]
     refs = ds[task["label_col"]]
+    label_feature = ds.features.get(task["label_col"])
+    refs_for_metric = image_classification_metric_labels(refs, label_feature, model.config)
     preds: List[int] = []
 
     model.eval()
@@ -381,7 +383,7 @@ def eval_image_classification(
             preds.extend(torch.argmax(out, dim=-1).cpu().tolist())
             del inp, out
 
-    return metric.compute(predictions=preds, references=refs)
+    return metric.compute(predictions=preds, references=refs_for_metric)
 
 
 def eval_asr(

@@ -7,7 +7,6 @@ OUTPUT_DIR="${ROOT_DIR}/outputs/domain_effect"
 SUMMARY_CSV="${ROOT_DIR}/experiment_domain_effect.csv"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 
-# Leave unset or empty to evaluate on the full split (omit --max-samples).
 MAX_SAMPLES="${MAX_SAMPLES-}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
