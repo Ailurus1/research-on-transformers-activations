@@ -596,11 +596,16 @@ def set_attention_linear_bias(model: GPT2LMHeadModel, enabled: bool) -> None:
             continue
         for name in ("c_attn", "c_proj"):
             conv = getattr(attn, name)
+            if conv.bias is None:
+                conv.bias = nn.Parameter(
+                    torch.zeros(conv.weight.shape[0], device=conv.weight.device, dtype=conv.weight.dtype)
+                )
             if enabled:
-                if conv.bias is None:
-                    conv.bias = nn.Parameter(torch.zeros(conv.weight.shape[0], device=conv.weight.device))
+                conv.bias.requires_grad_(True)
             else:
-                conv.bias = None
+                with torch.no_grad():
+                    conv.bias.zero_()
+                conv.bias.requires_grad_(False)
 
 
 def _copy_attn_weights(dst: GPT2Attention, src: GPT2Attention) -> None:
