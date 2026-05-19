@@ -196,12 +196,19 @@ def build_optimizer(model: nn.Module, args: argparse.Namespace) -> torch.optim.O
 
 
 class TrainParamsTrainer(Trainer):
-    def __init__(self, *args, train_options: TrainOptions, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        train_options: TrainOptions,
+        cli_args: argparse.Namespace,
+        **kwargs,
+    ) -> None:
         self.train_options = train_options
+        self.cli_args = cli_args
         super().__init__(*args, **kwargs)
 
     def create_optimizer(self) -> torch.optim.Optimizer:
-        return build_optimizer(self.model, self.args)  # type: ignore[arg-type]
+        return build_optimizer(self.model, self.cli_args)
 
 
 @torch.no_grad()
@@ -324,6 +331,24 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     model = build_model(opts)
     n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     use_ddp = n_gpus > 1 and not args.single_gpu
+    world_size = n_gpus if use_ddp else 1
+    steps_per_epoch = max(
+        1,
+        math.ceil(
+            len(train_ds)
+            / (
+                args.per_device_train_batch_size
+                * world_size
+                * args.gradient_accumulation_steps
+            )
+        ),
+    )
+    total_steps = (
+        args.max_steps
+        if args.max_steps > 0
+        else int(steps_per_epoch * args.num_train_epochs)
+    )
+    warmup_steps = max(1, int(total_steps * args.warmup_ratio))
 
     training_args = TrainingArguments(
         output_dir=str(run_dir / "checkpoints"),
@@ -333,7 +358,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         max_steps=args.max_steps if args.max_steps > 0 else -1,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
-        warmup_ratio=args.warmup_ratio,
+        warmup_steps=warmup_steps,
         lr_scheduler_type="cosine",
         logging_steps=args.logging_steps,
         save_strategy="no",
@@ -352,6 +377,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         train_dataset=train_ds,
         data_collator=collator,
         train_options=opts,
+        cli_args=args,
     )
 
     logger.info("Training run=%s on %d block(s), ddp=%s", run_name, len(train_ds), use_ddp)
