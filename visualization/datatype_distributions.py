@@ -110,7 +110,17 @@ FORMAT_DISPLAY: dict[str, str] = {
 
 def build_plot_title(order: list[str]) -> str:
     names = ", ".join(FORMAT_DISPLAY[k] for k in order)
-    return f"Representable finite values (x ≠ 0; one point per value)\n{names}"
+    return f"Distribution of representable finite values\n{names}"
+
+
+def _values_for_plot(series: Dict[str, np.ndarray], key: str) -> np.ndarray:
+    xv = np.asarray(series[key], dtype=np.float64)
+    xv = xv[np.isfinite(xv)]
+    return xv
+
+
+def _is_integer_dtype(key: str) -> bool:
+    return key in ("int4", "int8")
 
 
 def build_series(keys: List[str]) -> Dict[str, np.ndarray]:
@@ -147,37 +157,67 @@ def plot_value_sets(
     order: List[str],
     out_path: Path,
     title: str,
+    bins: int,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(12, 6))
-    y_step = 1.0
-    for i, key in enumerate(order):
-        xv = np.asarray(series[key], dtype=np.float64)
-        xv = xv[np.isfinite(xv)]
-        xv = xv[xv != 0]
-        if xv.size == 0:
-            continue
-        yv = np.full(xv.shape, i * y_step, dtype=np.float64)
-        ax.scatter(
-            xv,
-            yv,
-            s=14.0,
-            alpha=0.88,
-            linewidths=0.35,
-            edgecolors="0.15",
-            label=f"{FORMAT_DISPLAY[key]} (n={len(xv)})",
-        )
+    plotted: List[tuple[str, np.ndarray]] = []
+    for key in order:
+        xv = _values_for_plot(series, key)
+        if xv.size > 0:
+            plotted.append((key, xv))
 
-    ax.set_yticks([i * y_step for i in range(len(order))])
-    ax.set_yticklabels([FORMAT_DISPLAY[k] for k in order])
-    ax.set_xlabel("numeric value (linear)")
-    ax.set_title(title)
-    ax.set_xscale("linear")
-    ax.margins(x=0.02)
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend(loc="upper right", fontsize=7, ncol=2)
+    if not plotted:
+        raise ValueError("No non-zero finite values to plot for the selected formats.")
+
+    nrows = len(plotted)
+    fig, axes = plt.subplots(
+        nrows,
+        1,
+        figsize=(12, max(2.4 * nrows, 3.5)),
+        squeeze=False,
+        sharex=True,
+    )
+    axes_flat = axes.ravel()
+
+    x_min = min(float(xv.min()) for _, xv in plotted)
+    x_max = max(float(xv.max()) for _, xv in plotted)
+    pad = 0.02 * max(x_max - x_min, 1e-6)
+    x_range = (x_min - pad, x_max + pad)
+
+    for ax, (key, xv) in zip(axes_flat, plotted):
+        if _is_integer_dtype(key):
+            lo, hi = int(np.floor(xv.min())), int(np.ceil(xv.max()))
+            edges = np.arange(lo - 0.5, hi + 1.5, 4.0)
+            ax.hist(
+                xv,
+                bins=edges,
+                density=True,
+                color="steelblue",
+                edgecolor="0.2",
+                linewidth=0.6,
+                alpha=0.9,
+            )
+        else:
+            ax.hist(
+                xv,
+                bins=bins,
+                range=x_range,
+                density=True,
+                color="steelblue",
+                edgecolor="0.25",
+                linewidth=0.4,
+                alpha=0.9,
+            )
+        ax.set_ylabel("density", fontsize=8)
+        ax.set_title(f"{FORMAT_DISPLAY[key]} (n={len(xv)})", fontsize=9, loc="left")
+        ax.set_xscale("linear")
+        ax.grid(True, axis="y", alpha=0.25)
+        ax.margins(x=0)
+
+    axes_flat[-1].set_xlabel("numeric value (linear)")
+    fig.suptitle(title, fontsize=11, y=1.01)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=160)
+    fig.savefig(out_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -201,6 +241,12 @@ def main() -> None:
             "If omitted, all types are plotted."
         ),
     )
+    parser.add_argument(
+        "--bins",
+        type=int,
+        default=120,
+        help="Histogram bins for floating-point dtypes (int4/int8 use integer bins).",
+    )
     args = parser.parse_args()
 
     order = list(args.formats) if args.formats else list(DEFAULT_FORMAT_ORDER)
@@ -218,7 +264,7 @@ def main() -> None:
             raise KeyError(k)
 
     title = build_plot_title(order)
-    plot_value_sets(series, order, args.out, title)
+    plot_value_sets(series, order, args.out, title, bins=max(8, args.bins))
     print(f"Wrote {args.out} ({', '.join(order)})")
 
 
