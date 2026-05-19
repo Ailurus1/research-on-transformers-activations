@@ -208,7 +208,9 @@ class TrainParamsTrainer(Trainer):
         super().__init__(*args, **kwargs)
 
     def create_optimizer(self) -> torch.optim.Optimizer:
-        return build_optimizer(self.model, self.cli_args)
+        if self.optimizer is None:
+            self.optimizer = build_optimizer(self.model, self.cli_args)
+        return self.optimizer
 
 
 @torch.no_grad()
