@@ -6,10 +6,14 @@ import json
 import logging
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import torch
 from datasets import load_dataset
 from torch import nn
@@ -20,6 +24,7 @@ from transformers import (
     GPT2LMHeadModel,
     GPT2Tokenizer,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
 
@@ -195,6 +200,113 @@ def build_optimizer(model: nn.Module, args: argparse.Namespace) -> torch.optim.O
     )
 
 
+@dataclass
+class EpochHistory:
+    epoch: List[int] = field(default_factory=list)
+    train_loss: List[float] = field(default_factory=list)
+    eval_loss: List[float] = field(default_factory=list)
+    eval_perplexity: List[float] = field(default_factory=list)
+
+    def as_dict(self) -> Dict[str, List[float]]:
+        return {
+            "epoch": self.epoch,
+            "train_loss": self.train_loss,
+            "eval_loss": self.eval_loss,
+            "eval_perplexity": self.eval_perplexity,
+        }
+
+
+class EpochMetricsCallback(TrainerCallback):
+    def __init__(self, run_dir: Path, run_name: str) -> None:
+        self.run_dir = run_dir
+        self.run_name = run_name
+        self.history = EpochHistory()
+
+    def _mean_train_loss_for_epoch(self, state: Any, epoch: int) -> Optional[float]:
+        losses = [
+            float(log["loss"])
+            for log in state.log_history
+            if "loss" in log and int(log.get("epoch", -1)) == epoch
+        ]
+        if not losses:
+            return None
+        return sum(losses) / len(losses)
+
+    def on_evaluate(
+        self,
+        args: TrainingArguments,
+        state: Any,
+        control: Any,
+        metrics: Optional[Dict[str, float]] = None,
+        **kwargs: Any,
+    ) -> None:
+        if metrics is None or "eval_loss" not in metrics:
+            return
+        epoch = max(1, int(round(state.epoch)))
+        if self.history.epoch and self.history.epoch[-1] == epoch:
+            return
+
+        eval_loss = float(metrics["eval_loss"])
+        eval_ppl = float(metrics.get("eval_perplexity", math.exp(min(eval_loss, 80))))
+
+        train_loss = self._mean_train_loss_for_epoch(state, epoch)
+        if train_loss is None:
+            train_loss = float(metrics.get("train_loss", eval_loss))
+
+        self.history.epoch.append(epoch)
+        self.history.train_loss.append(train_loss)
+        self.history.eval_loss.append(eval_loss)
+        self.history.eval_perplexity.append(eval_ppl)
+
+        logger.info(
+            "Epoch %d — train_loss=%.4f eval_loss=%.4f eval_ppl=%.2f",
+            epoch,
+            train_loss,
+            eval_loss,
+            eval_ppl,
+        )
+
+    def on_train_end(self, args: TrainingArguments, state: Any, control: Any, **kwargs: Any) -> None:
+        if int(os.environ.get("LOCAL_RANK", -1)) not in (-1, 0):
+            return
+        if not self.history.epoch:
+            return
+        save_training_curves(self.history, self.run_dir, self.run_name)
+
+
+def save_training_curves(history: EpochHistory, run_dir: Path, run_name: str) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    epochs = history.epoch
+
+    fig, (ax_loss, ax_ppl) = plt.subplots(1, 2, figsize=(10, 4))
+
+    ax_loss.plot(epochs, history.train_loss, "o-", label="train loss", color="tab:blue")
+    ax_loss.plot(epochs, history.eval_loss, "s-", label="eval loss", color="tab:orange")
+    ax_loss.set_xlabel("epoch")
+    ax_loss.set_ylabel("cross-entropy loss")
+    ax_loss.set_title("Loss per epoch")
+    ax_loss.legend()
+    ax_loss.grid(True, alpha=0.3)
+
+    ax_ppl.plot(epochs, history.eval_perplexity, "D-", label="eval perplexity", color="tab:green")
+    ax_ppl.set_xlabel("epoch")
+    ax_ppl.set_ylabel("perplexity")
+    ax_ppl.set_title("Validation perplexity per epoch")
+    ax_ppl.legend()
+    ax_ppl.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    plot_path = run_dir / f"{run_name}_training_curves.png"
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+
+    history_path = run_dir / f"{run_name}_epoch_history.json"
+    with open(history_path, "w", encoding="utf-8") as f:
+        json.dump(history.as_dict(), f, indent=2)
+
+    logger.info("Saved training curves to %s", plot_path)
+
+
 class TrainParamsTrainer(Trainer):
     def __init__(
         self,
@@ -211,6 +323,24 @@ class TrainParamsTrainer(Trainer):
         if self.optimizer is None:
             self.optimizer = build_optimizer(self.model, self.cli_args)
         return self.optimizer
+
+    def evaluate(
+        self,
+        eval_dataset=None,
+        ignore_keys=None,
+        metric_key_prefix: str = "eval",
+        **kwargs: Any,
+    ):
+        metrics = super().evaluate(
+            eval_dataset=eval_dataset,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix,
+            **kwargs,
+        )
+        loss_key = f"{metric_key_prefix}_loss"
+        if loss_key in metrics and math.isfinite(metrics[loss_key]):
+            metrics[f"{metric_key_prefix}_perplexity"] = math.exp(min(metrics[loss_key], 80))
+        return metrics
 
 
 @torch.no_grad()
@@ -327,8 +457,17 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     if not train_blocks["input_ids"]:
         raise RuntimeError("WikiText-2 train split produced zero blocks; check block_size.")
 
+    val_blocks = load_wikitext_blocks("validation", tokenizer, args.block_size)
     train_ds = BlockDataset(train_blocks["input_ids"], train_blocks["attention_mask"])
+    eval_ds = (
+        BlockDataset(val_blocks["input_ids"], val_blocks["attention_mask"])
+        if val_blocks["input_ids"]
+        else None
+    )
+    if eval_ds is None:
+        logger.warning("WikiText-2 validation split produced zero blocks; epoch eval disabled.")
     collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+    metrics_callback = EpochMetricsCallback(run_dir, run_name)
 
     model = build_model(opts)
     n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -363,7 +502,10 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         warmup_steps=warmup_steps,
         lr_scheduler_type="cosine",
         logging_steps=args.logging_steps,
+        logging_strategy="steps",
         save_strategy="no",
+        evaluation_strategy="epoch" if eval_ds is not None else "no",
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
         report_to="none",
         seed=args.seed,
         dataloader_num_workers=args.dataloader_num_workers,
@@ -377,9 +519,11 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         model=model,
         args=training_args,
         train_dataset=train_ds,
+        eval_dataset=eval_ds,
         data_collator=collator,
         train_options=opts,
         cli_args=args,
+        callbacks=[metrics_callback],
     )
 
     logger.info("Training run=%s on %d block(s), ddp=%s", run_name, len(train_ds), use_ddp)
@@ -417,6 +561,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
 
     metrics = {
         "run_name": run_name,
+        "epoch_history": metrics_callback.history.as_dict(),
         "options": {
             "optimizer": opts.optimizer,
             "attention_bias": opts.attention_bias,
@@ -493,6 +638,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-train-epochs", type=float, default=3.0)
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--per-device-train-batch-size", type=int, default=8)
+    parser.add_argument(
+        "--per-device-eval-batch-size",
+        type=int,
+        default=8,
+        help="Batch size for per-epoch validation eval.",
+    )
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
