@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import inspect
 import json
 import logging
 import math
@@ -155,6 +156,18 @@ class BlockDataset(torch.utils.data.Dataset):
             "input_ids": torch.tensor(self.input_ids[idx], dtype=torch.long),
             "attention_mask": torch.tensor(self.attention_mask[idx], dtype=torch.long),
         }
+
+
+def _training_args_kwargs(base: Dict[str, Any]) -> Dict[str, Any]:
+    params = inspect.signature(TrainingArguments.__init__).parameters
+    out = dict(base)
+    renames = {"evaluation_strategy": "eval_strategy"}
+    for old, new in renames.items():
+        if old in out and old not in params and new in params:
+            out[new] = out.pop(old)
+        elif new in out and new not in params and old in params:
+            out[old] = out.pop(new)
+    return {k: v for k, v in out.items() if k in params}
 
 
 def build_optimizer(model: nn.Module, args: argparse.Namespace) -> torch.optim.Optimizer:
@@ -491,28 +504,33 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     )
     warmup_steps = max(1, int(total_steps * args.warmup_ratio))
 
+    eval_strategy = "epoch" if eval_ds is not None else "no"
     training_args = TrainingArguments(
-        output_dir=str(run_dir / "checkpoints"),
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        num_train_epochs=args.num_train_epochs,
-        max_steps=args.max_steps if args.max_steps > 0 else -1,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        warmup_steps=warmup_steps,
-        lr_scheduler_type="cosine",
-        logging_steps=args.logging_steps,
-        logging_strategy="steps",
-        save_strategy="no",
-        evaluation_strategy="epoch" if eval_ds is not None else "no",
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        report_to="none",
-        seed=args.seed,
-        dataloader_num_workers=args.dataloader_num_workers,
-        fp16=args.fp16 and torch.cuda.is_available(),
-        bf16=args.bf16 and torch.cuda.is_available(),
-        label_smoothing_factor=opts.label_smoothing,
-        **({"ddp_find_unused_parameters": False} if use_ddp else {}),
+        **_training_args_kwargs(
+            {
+                "output_dir": str(run_dir / "checkpoints"),
+                "per_device_train_batch_size": args.per_device_train_batch_size,
+                "gradient_accumulation_steps": args.gradient_accumulation_steps,
+                "num_train_epochs": args.num_train_epochs,
+                "max_steps": args.max_steps if args.max_steps > 0 else -1,
+                "learning_rate": args.learning_rate,
+                "weight_decay": args.weight_decay,
+                "warmup_steps": warmup_steps,
+                "lr_scheduler_type": "cosine",
+                "logging_steps": args.logging_steps,
+                "logging_strategy": "steps",
+                "save_strategy": "no",
+                "evaluation_strategy": eval_strategy,
+                "per_device_eval_batch_size": args.per_device_eval_batch_size,
+                "report_to": "none",
+                "seed": args.seed,
+                "dataloader_num_workers": args.dataloader_num_workers,
+                "fp16": args.fp16 and torch.cuda.is_available(),
+                "bf16": args.bf16 and torch.cuda.is_available(),
+                "label_smoothing_factor": opts.label_smoothing,
+                **({"ddp_find_unused_parameters": False} if use_ddp else {}),
+            }
+        )
     )
 
     trainer = TrainParamsTrainer(
