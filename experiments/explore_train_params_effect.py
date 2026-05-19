@@ -326,16 +326,28 @@ class TrainParamsTrainer(Trainer):
         *args,
         train_options: TrainOptions,
         cli_args: argparse.Namespace,
+        eval_tokenizer: GPT2Tokenizer,
         **kwargs,
     ) -> None:
         self.train_options = train_options
         self.cli_args = cli_args
+        self.eval_tokenizer = eval_tokenizer
         super().__init__(*args, **kwargs)
 
     def create_optimizer(self) -> torch.optim.Optimizer:
         if self.optimizer is None:
             self.optimizer = build_optimizer(self.model, self.cli_args)
         return self.optimizer
+
+    def _unwrap_model(self) -> nn.Module:
+        model = self.model
+        if hasattr(model, "module"):
+            model = model.module
+        return model
+
+    def _eval_max_length(self) -> int:
+        model = self._unwrap_model()
+        return min(self.cli_args.block_size, int(model.config.n_positions))
 
     def evaluate(
         self,
@@ -344,16 +356,26 @@ class TrainParamsTrainer(Trainer):
         metric_key_prefix: str = "eval",
         **kwargs: Any,
     ):
-        metrics = super().evaluate(
-            eval_dataset=eval_dataset,
-            ignore_keys=ignore_keys,
-            metric_key_prefix=metric_key_prefix,
-            **kwargs,
+        # Use the same sliding-window recipe as final test eval (not fixed-block CE).
+        model = self._unwrap_model()
+        device = self.args.device
+        if not isinstance(device, torch.device):
+            device = torch.device(device)
+
+        split = "validation" if metric_key_prefix == "eval" else "test"
+        result = eval_wikitext2_perplexity(
+            model,
+            self.eval_tokenizer,
+            device,
+            max_length=self._eval_max_length(),
+            stride=self.cli_args.eval_stride,
+            split=split,
         )
-        loss_key = f"{metric_key_prefix}_loss"
-        if loss_key in metrics and math.isfinite(metrics[loss_key]):
-            metrics[f"{metric_key_prefix}_perplexity"] = math.exp(min(metrics[loss_key], 80))
-        return metrics
+        return {
+            f"{metric_key_prefix}_loss": result["avg_nll"],
+            f"{metric_key_prefix}_perplexity": result["perplexity"],
+            f"{metric_key_prefix}_tokens_scored": result["tokens_scored"],
+        }
 
 
 @torch.no_grad()
@@ -361,39 +383,68 @@ def eval_wikitext2_perplexity(
     model: nn.Module,
     tokenizer: GPT2Tokenizer,
     device: torch.device,
-    block_size: int,
+    max_length: int,
     stride: int,
     split: str = "test",
 ) -> Dict[str, float]:
+    """Sliding-window perplexity on concatenated WikiText-2 (HF recipe).
+
+    Each token is scored exactly once. Overlapping context is used for conditioning,
+    but loss is accumulated only on non-overlapping target spans (``trg_len``).
+    See https://huggingface.co/docs/transformers/perplexity
+    """
+    n_positions = int(getattr(model.config, "n_positions", 1024))
+    max_length = min(max_length, n_positions)
+    stride = max(1, min(stride, max_length))
+
     ds = load_dataset("wikitext", WIKITEXT_CONFIG, split=split)
     text = "\n\n".join(t for t in ds["text"] if isinstance(t, str) and t.strip())
     enc = tokenizer(text, return_tensors="pt")
     input_ids = enc["input_ids"].to(device)
-    seq_len = input_ids.size(1)
+    seq_len = int(input_ids.size(1))
+    if seq_len < 2:
+        raise RuntimeError(f"WikiText-2 {split} split is too short for perplexity eval.")
 
-    nlls: List[torch.Tensor] = []
     model.eval()
+    nll_sum = 0.0
+    prev_end_loc = 0
+    n_windows = 0
 
-    for begin in tqdm(range(0, seq_len, stride), desc=f"ppl-{split}", leave=False):
-        end = min(begin + block_size, seq_len)
-        trg_len = end - begin
-        if trg_len < 2:
-            continue
-        chunk = input_ids[:, begin:end]
+    for begin_loc in tqdm(range(0, seq_len, stride), desc=f"ppl-{split}", leave=False):
+        end_loc = min(begin_loc + max_length, seq_len)
+        trg_len = end_loc - prev_end_loc
+        if trg_len <= 0:
+            break
+
+        chunk = input_ids[:, begin_loc:end_loc]
         labels = chunk.clone()
         labels[:, :-trg_len] = -100
+
         outputs = model(chunk, labels=labels)
-        if outputs.loss is None or not math.isfinite(float(outputs.loss)):
-            continue
-        nlls.append(outputs.loss.detach() * trg_len)
+        loss = outputs.loss
+        if loss is None or not math.isfinite(float(loss)):
+            raise RuntimeError(f"Non-finite loss in {split} perplexity window at {begin_loc}:{end_loc}")
 
-    if not nlls:
-        raise RuntimeError(f"No valid loss chunks for WikiText-2 {split} perplexity.")
+        nll_sum += float(loss.item()) * trg_len
+        n_windows += 1
+        prev_end_loc = end_loc
+        if end_loc >= seq_len:
+            break
 
-    total_nll = torch.stack(nlls).sum().item()
-    avg_nll = total_nll / seq_len
+    if prev_end_loc == 0:
+        raise RuntimeError(f"No perplexity windows for WikiText-2 {split} split.")
+
+    avg_nll = nll_sum / prev_end_loc
     perplexity = math.exp(avg_nll) if avg_nll < 80 else float("inf")
-    return {"perplexity": perplexity, "avg_nll": avg_nll, "tokens": seq_len}
+    return {
+        "perplexity": perplexity,
+        "avg_nll": avg_nll,
+        "tokens_scored": prev_end_loc,
+        "seq_len": seq_len,
+        "max_length": max_length,
+        "stride": stride,
+        "n_windows": n_windows,
+    }
 
 
 def apply_int8_fake_quant(model: nn.Module) -> nn.Module:
@@ -470,15 +521,9 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     if not train_blocks["input_ids"]:
         raise RuntimeError("WikiText-2 train split produced zero blocks; check block_size.")
 
-    val_blocks = load_wikitext_blocks("validation", tokenizer, args.block_size)
     train_ds = BlockDataset(train_blocks["input_ids"], train_blocks["attention_mask"])
-    eval_ds = (
-        BlockDataset(val_blocks["input_ids"], val_blocks["attention_mask"])
-        if val_blocks["input_ids"]
-        else None
-    )
-    if eval_ds is None:
-        logger.warning("WikiText-2 validation split produced zero blocks; epoch eval disabled.")
+    # Trainer needs a non-empty eval_dataset to trigger evaluate(); metrics use sliding-window PPL.
+    eval_ds = train_ds
     collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     metrics_callback = EpochMetricsCallback(run_dir, run_name)
 
@@ -504,7 +549,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     )
     warmup_steps = max(1, int(total_steps * args.warmup_ratio))
 
-    eval_strategy = "epoch" if eval_ds is not None else "no"
+    eval_strategy = "epoch" if args.num_train_epochs > 0 else "no"
     training_args = TrainingArguments(
         **_training_args_kwargs(
             {
@@ -541,6 +586,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         data_collator=collator,
         train_options=opts,
         cli_args=args,
+        eval_tokenizer=tokenizer,
         callbacks=[metrics_callback],
     )
 
@@ -556,11 +602,12 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     trained_model = trained_model.to(device)
 
+    eval_max_length = min(args.block_size, trained_model.config.n_positions)
     fp32_metrics = eval_wikitext2_perplexity(
         trained_model,
         tokenizer,
         device,
-        block_size=min(args.block_size, trained_model.config.n_positions),
+        max_length=eval_max_length,
         stride=args.eval_stride,
         split="test",
     )
@@ -571,7 +618,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         int8_model,
         tokenizer,
         device,
-        block_size=min(args.block_size, int8_model.config.n_positions),
+        max_length=eval_max_length,
         stride=args.eval_stride,
         split="test",
     )
@@ -652,8 +699,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--block-size", type=int, default=128)
-    parser.add_argument("--eval-stride", type=int, default=64)
-    parser.add_argument("--num-train-epochs", type=float, default=3.0)
+    parser.add_argument(
+        "--eval-stride",
+        type=int,
+        default=64,
+        help="Sliding-window stride for val/test perplexity (must be <= --block-size).",
+    )
+    parser.add_argument("--num-train-epochs", type=float, default=10.0)
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--per-device-train-batch-size", type=int, default=8)
     parser.add_argument(
