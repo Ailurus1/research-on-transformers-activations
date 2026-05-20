@@ -220,14 +220,18 @@ class myGPT2Attention(nn.Module):
 
     def forward(
         self,
-        hidden_states: Tensor,
-        layer_past: Optional[Tuple[Tensor, Tensor]] = None,
+        hidden_states: Any = None,
+        past_key_values: Any = None,
         attention_mask: Optional[Tensor] = None,
         head_mask: Optional[Tensor] = None,
         use_cache: bool = False,
         output_attentions: bool = False,
-        **_kwargs: Any,
-    ) -> Tuple[Tensor, ...]:
+        layer_past: Optional[Tuple[Tensor, Tensor]] = None,
+        **kwargs: Any,
+    ) -> Tuple[Tensor, Optional[Tensor]]:
+        del past_key_values, use_cache, layer_past, kwargs
+        hidden_states = _resolve_hidden_states(hidden_states, {})
+
         query, key = self.qk_attn(hidden_states).split(self.split_size, dim=2)
         value = self.v_attn(hidden_states)
         query = self._split_heads(query, self.num_heads, self.head_dim)
@@ -241,15 +245,13 @@ class myGPT2Attention(nn.Module):
             key = torch.cat((past_key, key), dim=-2)
             value = torch.cat((past_value, value), dim=-2)
 
-        present = (key, value) if use_cache else None
         attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
         proj_output = self.c_proj(attn_output)
         proj_output = self.resid_dropout(proj_output)
-        outputs = (proj_output, present)
         if output_attentions:
-            outputs += (attn_weights,)
-        return outputs
+            return proj_output, attn_weights
+        return proj_output, None
 
 
 class myGPT2Block(nn.Module):
@@ -299,30 +301,28 @@ class myGPT2Block(nn.Module):
 
     def forward(
         self,
-        hidden_states: Tensor,
-        layer_past: Optional[Tuple[Tensor, Tensor]] = None,
+        hidden_states: Any,
+        past_key_values: Any = None,
         attention_mask: Optional[Tensor] = None,
-        head_mask: Optional[Tensor] = None,
+        encoder_hidden_states: Optional[Tensor] = None,
+        encoder_attention_mask: Optional[Tensor] = None,
         use_cache: bool = False,
-        output_attentions: bool = False,
-        **_kwargs: Any,
-    ) -> Tuple[Tensor, ...]:
+        **kwargs: Any,
+    ) -> Tensor:
+        del past_key_values, encoder_hidden_states, encoder_attention_mask, use_cache, kwargs
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+
         if self.norm_position == "post":
             hidden_states = self.ln_1(hidden_states)
         skip_branch = hidden_states
         if self.norm_position == "pre":
             hidden_states = self.ln_1(hidden_states)
 
-        attn_outputs = self.attn(
+        attn_output, _ = self.attn(
             hidden_states,
-            layer_past=layer_past,
             attention_mask=attention_mask,
-            head_mask=head_mask,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
         )
-        attn_output = attn_outputs[0]
-        outputs = attn_outputs[1:]
 
         if self.parallel_layers:
             feed_forward_hidden_states = self.mlp(hidden_states)
@@ -348,11 +348,15 @@ class myGPT2Block(nn.Module):
             if self.add_mlp_skip:
                 hidden_states = hidden_states + self.mlp_block_skip_gain * skip_branch
 
-        if use_cache:
-            outputs = (hidden_states,) + outputs
-        else:
-            outputs = (hidden_states,) + outputs[1:]
-        return outputs
+        return hidden_states
+
+
+def _resolve_hidden_states(hidden_states: Any, kwargs: dict[str, Any]) -> Tensor:
+    if hidden_states is None and kwargs:
+        hidden_states = next(iter(kwargs.values()))
+    if isinstance(hidden_states, tuple):
+        hidden_states = hidden_states[0]
+    return hidden_states
 
 
 def _op_block_config(config: Any) -> None:
@@ -394,15 +398,6 @@ def apply_op_blocks(model: GPT2LMHeadModel) -> GPT2LMHeadModel:
         new_blocks.append(myGPT2Block(model.config, layer_idx=i))
     model.transformer.h = nn.ModuleList(new_blocks)
     return model
-
-
-
-def _resolve_hidden_states(hidden_states: Any, kwargs: dict[str, Any]) -> Tensor:
-    if hidden_states is None and kwargs:
-        hidden_states = next(iter(kwargs.values()))
-    if isinstance(hidden_states, tuple):
-        hidden_states = hidden_states[0]
-    return hidden_states
 
 
 def _gpt2_split_heads(tensor: Tensor, num_heads: int, head_dim: int) -> Tensor:
