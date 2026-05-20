@@ -226,10 +226,9 @@ class myGPT2Attention(nn.Module):
         head_mask: Optional[Tensor] = None,
         use_cache: bool = False,
         output_attentions: bool = False,
-        layer_past: Optional[Tuple[Tensor, Tensor]] = None,
         **kwargs: Any,
     ) -> Tuple[Tensor, Optional[Tensor]]:
-        del past_key_values, use_cache, layer_past, kwargs
+        del past_key_values, use_cache, kwargs
         hidden_states = _resolve_hidden_states(hidden_states, {})
 
         query, key = self.qk_attn(hidden_states).split(self.split_size, dim=2)
@@ -239,11 +238,6 @@ class myGPT2Attention(nn.Module):
         value = self._split_heads(value, self.num_heads, self.head_dim)
         query = self.q_norm(query)
         key = self.k_norm(key)
-
-        if layer_past is not None:
-            past_key, past_value = layer_past
-            key = torch.cat((past_key, key), dim=-2)
-            value = torch.cat((past_value, value), dim=-2)
 
         attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
