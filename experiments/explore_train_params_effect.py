@@ -47,11 +47,12 @@ from experiments.utils import set_seed
 logger = logging.getLogger(__name__)
 
 WIKITEXT_CONFIG = "wikitext-2-raw-v1"
-MODEL_ID = "gpt2"
+SUPPORTED_GPT2_MODELS = ("gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl")
 
 
 @dataclass
 class TrainOptions:
+    model_name: str
     optimizer: str
     attention_bias: bool
     attention_linear_bias: bool
@@ -62,7 +63,7 @@ class TrainOptions:
 
     def run_name(self) -> str:
         parts = [
-            "gpt2small",
+            self.model_name.replace("-", ""),
             "wt2",
             "soap" if self.optimizer == "soap" else "adamw",
             "attnbias" if self.attention_bias else "noattnbias",
@@ -80,6 +81,7 @@ class TrainOptions:
 
 def build_train_options(args: argparse.Namespace) -> TrainOptions:
     return TrainOptions(
+        model_name=args.model_name,
         optimizer=args.optimizer,
         attention_bias=args.attention_bias,
         attention_linear_bias=args.attention_linear_bias,
@@ -91,7 +93,7 @@ def build_train_options(args: argparse.Namespace) -> TrainOptions:
 
 
 def build_model(opts: TrainOptions) -> GPT2LMHeadModel:
-    config = GPT2Config.from_pretrained(MODEL_ID)
+    config = GPT2Config.from_pretrained(opts.model_name)
     model = GPT2LMHeadModel(config)
 
     set_attention_linear_bias(model, opts.attention_linear_bias)
@@ -320,6 +322,52 @@ def save_training_curves(history: EpochHistory, run_dir: Path, run_name: str) ->
     logger.info("Saved training curves to %s", plot_path)
 
 
+def _history_from_log_history(log_history: List[Dict[str, Any]]) -> EpochHistory:
+    history = EpochHistory()
+    by_epoch: Dict[int, Dict[str, float]] = {}
+    for rec in log_history:
+        epoch_raw = rec.get("epoch")
+        if epoch_raw is None:
+            continue
+        epoch = max(1, int(round(float(epoch_raw))))
+        slot = by_epoch.setdefault(epoch, {})
+        if "loss" in rec:
+            slot.setdefault("train_loss_sum", 0.0)
+            slot.setdefault("train_loss_n", 0.0)
+            slot["train_loss_sum"] += float(rec["loss"])
+            slot["train_loss_n"] += 1.0
+        if "eval_loss" in rec:
+            slot["eval_loss"] = float(rec["eval_loss"])
+        if "eval_perplexity" in rec:
+            slot["eval_perplexity"] = float(rec["eval_perplexity"])
+
+    for epoch in sorted(by_epoch.keys()):
+        slot = by_epoch[epoch]
+        if "eval_loss" not in slot:
+            continue
+        train_n = max(1.0, slot.get("train_loss_n", 0.0))
+        train_loss = slot.get("train_loss_sum", slot["eval_loss"]) / train_n
+        eval_loss = slot["eval_loss"]
+        eval_ppl = slot.get("eval_perplexity", math.exp(min(eval_loss, 80.0)))
+        history.epoch.append(epoch)
+        history.train_loss.append(float(train_loss))
+        history.eval_loss.append(float(eval_loss))
+        history.eval_perplexity.append(float(eval_ppl))
+    return history
+
+
+def ensure_training_curves_saved(
+    callback: EpochMetricsCallback, log_history: List[Dict[str, Any]], run_dir: Path, run_name: str
+) -> None:
+    if int(os.environ.get("LOCAL_RANK", -1)) not in (-1, 0):
+        return
+    history = callback.history if callback.history.epoch else _history_from_log_history(log_history)
+    if not history.epoch:
+        logger.warning("No epoch metrics available; skipping training curve save.")
+        return
+    save_training_curves(history, run_dir, run_name)
+
+
 class TrainParamsTrainer(Trainer):
     def __init__(
         self,
@@ -387,12 +435,6 @@ def eval_wikitext2_perplexity(
     stride: int,
     split: str = "test",
 ) -> Dict[str, float]:
-    """Sliding-window perplexity on concatenated WikiText-2 (HF recipe).
-
-    Each token is scored exactly once. Overlapping context is used for conditioning,
-    but loss is accumulated only on non-overlapping target spans (``trg_len``).
-    See https://huggingface.co/docs/transformers/perplexity
-    """
     n_positions = int(getattr(model.config, "n_positions", 1024))
     max_length = min(max_length, n_positions)
     stride = max(1, min(stride, max_length))
@@ -513,7 +555,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
 
     set_seed(args.seed)
 
-    tokenizer = GPT2Tokenizer.from_pretrained(MODEL_ID)
+    tokenizer = GPT2Tokenizer.from_pretrained(opts.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -592,6 +634,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
 
     logger.info("Training run=%s on %d block(s), ddp=%s", run_name, len(train_ds), use_ddp)
     trainer.train()
+    ensure_training_curves_saved(metrics_callback, trainer.state.log_history, run_dir, run_name)
     if opts.qat:
         disable_qat_training()
 
@@ -639,6 +682,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         "fp32_test": fp32_metrics,
         "int8_fake_static_test": int8_metrics,
         "training": {
+            "model_name": opts.model_name,
             "block_size": args.block_size,
             "num_train_epochs": args.num_train_epochs,
             "max_steps": args.max_steps,
@@ -656,9 +700,16 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train GPT-2 small on WikiText-2 with optional mods; eval FP32 and INT8 PPL."
+        description="Train GPT-2 variants on WikiText-2 with optional mods; eval FP32 and INT8 PPL."
     )
     parser.add_argument("--output-dir", type=str, default="outputs/train_params")
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default="gpt2",
+        choices=SUPPORTED_GPT2_MODELS,
+        help="GPT-2 variant to train.",
+    )
 
     parser.add_argument(
         "--optimizer",
