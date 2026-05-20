@@ -608,6 +608,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
                 "logging_strategy": "steps",
                 "save_strategy": "no",
                 "evaluation_strategy": eval_strategy,
+                "do_eval": True,
                 "per_device_eval_batch_size": args.per_device_eval_batch_size,
                 "report_to": "none",
                 "seed": args.seed,
@@ -646,6 +647,16 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     trained_model = trained_model.to(device)
 
     eval_max_length = min(args.block_size, trained_model.config.n_positions)
+    fp32_val_metrics = eval_wikitext2_perplexity(
+        trained_model,
+        tokenizer,
+        device,
+        max_length=eval_max_length,
+        stride=args.eval_stride,
+        split="validation",
+    )
+    logger.info("FP32 validation perplexity: %.4f", fp32_val_metrics["perplexity"])
+
     fp32_metrics = eval_wikitext2_perplexity(
         trained_model,
         tokenizer,
@@ -679,6 +690,7 @@ def train_and_evaluate(args: argparse.Namespace) -> Dict[str, Any]:
             "qat": opts.qat,
             "label_smoothing": opts.label_smoothing,
         },
+        "fp32_validation": fp32_val_metrics,
         "fp32_test": fp32_metrics,
         "int8_fake_static_test": int8_metrics,
         "training": {
