@@ -30,6 +30,7 @@ dependencies = [
   "librosa",
   "soundfile",
   "matplotlib>=3.8.0",
+  "pytorch-optimizer"
 ]
 
 [tool.setuptools.packages.find]
