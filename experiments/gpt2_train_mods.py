@@ -410,7 +410,11 @@ def _gpt2_split_heads(tensor: Tensor, num_heads: int, head_dim: int) -> Tensor:
 
 
 def _gpt2_merge_heads(tensor: Tensor) -> Tensor:
-    return tensor.reshape(*tensor.shape[:-2], -1).contiguous()
+    # (batch, num_heads, seq_len, head_dim) -> (batch, seq_len, hidden_size)
+    if tensor.dim() != 4:
+        return tensor.reshape(*tensor.shape[:-1], -1).contiguous()
+    batch, num_heads, seq_len, head_dim = tensor.size()
+    return tensor.transpose(1, 2).contiguous().view(batch, seq_len, num_heads * head_dim)
 
 
 def _gpt2_project_qkv(attn: GPT2Attention, hidden_states: Tensor) -> tuple[Tensor, Tensor, Tensor]:
