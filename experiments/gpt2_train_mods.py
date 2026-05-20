@@ -397,6 +397,55 @@ def apply_op_blocks(model: GPT2LMHeadModel) -> GPT2LMHeadModel:
 
 
 
+def _resolve_hidden_states(hidden_states: Any, kwargs: dict[str, Any]) -> Tensor:
+    if hidden_states is None and kwargs:
+        hidden_states = next(iter(kwargs.values()))
+    if isinstance(hidden_states, tuple):
+        hidden_states = hidden_states[0]
+    return hidden_states
+
+
+def _gpt2_split_heads(tensor: Tensor, num_heads: int, head_dim: int) -> Tensor:
+    return tensor.view(*tensor.shape[:-1], num_heads, head_dim).transpose(1, 2)
+
+
+def _gpt2_merge_heads(tensor: Tensor) -> Tensor:
+    return tensor.reshape(*tensor.shape[:-2], -1).contiguous()
+
+
+def _gpt2_project_qkv(attn: GPT2Attention, hidden_states: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    query, key, value = attn.c_attn(hidden_states).split(attn.split_size, dim=2)
+    nh, hd = attn.num_heads, attn.head_dim
+    return (
+        _gpt2_split_heads(query, nh, hd),
+        _gpt2_split_heads(key, nh, hd),
+        _gpt2_split_heads(value, nh, hd),
+    )
+
+
+def _gpt2_eager_attention(
+    attn: GPT2Attention,
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    attention_mask: Optional[Tensor],
+) -> tuple[Tensor, Tensor]:
+    scaling = getattr(attn, "scaling", attn.head_dim**-0.5)
+    attn_weights = torch.matmul(query, key.transpose(-1, -2)) * scaling
+    if attention_mask is not None:
+        attn_weights = attn_weights + attention_mask
+    attn_weights = F.softmax(attn_weights, dim=-1)
+    attn_weights = attn.attn_dropout(attn_weights)
+    attn_output = torch.matmul(attn_weights, value)
+    return attn_output, attn_weights
+
+
+def _gpt2_finish_attention(attn: GPT2Attention, attn_output: Tensor) -> Tensor:
+    attn_output = _gpt2_merge_heads(attn_output)
+    attn_output = attn.c_proj(attn_output)
+    return attn.resid_dropout(attn_output)
+
+
 class GPT2AttentionWithKVBias(GPT2Attention):
     def __init__(self, config: Any, is_cross_attention: bool = False, layer_idx: Optional[int] = None):
         super().__init__(config, is_cross_attention=is_cross_attention, layer_idx=layer_idx)
@@ -408,33 +457,25 @@ class GPT2AttentionWithKVBias(GPT2Attention):
 
     def forward(
         self,
-        hidden_states: Optional[Tuple[Tensor]] = None,
-        layer_past: Optional[Tuple[Tensor, Tensor]] = None,
+        hidden_states: Any = None,
+        past_key_values: Any = None,
         attention_mask: Optional[Tensor] = None,
-        head_mask: Optional[Tensor] = None,
         encoder_hidden_states: Optional[Tensor] = None,
         encoder_attention_mask: Optional[Tensor] = None,
         use_cache: bool = False,
         output_attentions: bool = False,
         **kwargs: Any,
-    ) -> Union[Tuple[Tensor, ...], Tuple[Tensor, Tuple[Tensor, Tensor], Tensor]]:
-        if hidden_states is None and len(kwargs) == 1:
-            hidden_states = next(iter(kwargs.values()))
-        assert encoder_hidden_states is None
+    ) -> tuple[Tensor, Optional[Tensor]]:
+        del past_key_values, encoder_hidden_states, encoder_attention_mask, use_cache
+        hidden_states = _resolve_hidden_states(hidden_states, kwargs)
 
-        query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
-        query = self._split_heads(query, self.num_heads, self.head_dim)
-        key = self._split_heads(key, self.num_heads, self.head_dim)
-        value = self._split_heads(value, self.num_heads, self.head_dim)
-
+        query, key, value = _gpt2_project_qkv(self, hidden_states)
         batch_size = hidden_states.size(0)
-        k_bias = self.k_bias.expand(batch_size, -1, -1, -1)
-        v_bias = self.v_bias.expand(batch_size, -1, -1, -1)
-        key = torch.cat((k_bias, key), dim=2)
-        value = torch.cat((v_bias, value), dim=2)
+        key = torch.cat((self.k_bias.expand(batch_size, -1, -1, -1), key), dim=2)
+        value = torch.cat((self.v_bias.expand(batch_size, -1, -1, -1), value), dim=2)
 
-        seq_len = key.size(-2)
         query_len = query.size(-2)
+        seq_len = key.size(-2)
         causal = torch.ones(
             query_len, seq_len, dtype=torch.bool, device=hidden_states.device
         ).tril(diagonal=seq_len - query_len)
@@ -444,21 +485,11 @@ class GPT2AttentionWithKVBias(GPT2Attention):
         if attention_mask is not None:
             attn_mask = attn_mask + attention_mask
 
-        if layer_past is not None:
-            past_key, past_value = layer_past
-            key = torch.cat((past_key, key), dim=-2)
-            value = torch.cat((past_value, value), dim=-2)
-
-        present = (key, value) if use_cache else None
-        attn_output, attn_weights = self._attn(query, key, value, attn_mask, head_mask)
-        attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
-        attn_output = self.c_proj(attn_output)
-        attn_output = self.resid_dropout(attn_output)
-
-        outputs = (attn_output, present)
+        attn_output, attn_weights = _gpt2_eager_attention(self, query, key, value, attn_mask)
+        attn_output = _gpt2_finish_attention(self, attn_output)
         if output_attentions:
-            outputs += (attn_weights,)
-        return outputs
+            return attn_output, attn_weights
+        return attn_output, None
 
 
 class GPT2AttentionWithKVBiasAndCAScale(GPT2Attention):
@@ -478,31 +509,25 @@ class GPT2AttentionWithKVBiasAndCAScale(GPT2Attention):
 
     def forward(
         self,
-        hidden_states: Optional[Tuple[Tensor]] = None,
-        layer_past: Optional[Tuple[Tensor, Tensor]] = None,
+        hidden_states: Any = None,
+        past_key_values: Any = None,
         attention_mask: Optional[Tensor] = None,
-        head_mask: Optional[Tensor] = None,
         encoder_hidden_states: Optional[Tensor] = None,
         encoder_attention_mask: Optional[Tensor] = None,
         use_cache: bool = False,
         output_attentions: bool = False,
         **kwargs: Any,
-    ) -> Union[Tuple[Tensor, ...], Tuple[Tensor, Tuple[Tensor, Tensor], Tensor]]:
-        if hidden_states is None and len(kwargs) == 1:
-            hidden_states = next(iter(kwargs.values()))
-        assert encoder_hidden_states is None
+    ) -> tuple[Tensor, Optional[Tensor]]:
+        del past_key_values, encoder_hidden_states, encoder_attention_mask, use_cache
+        hidden_states = _resolve_hidden_states(hidden_states, kwargs)
 
-        query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
-        query = self._split_heads(query, self.num_heads, self.head_dim)
-        key = self._split_heads(key, self.num_heads, self.head_dim)
-        value = self._split_heads(value, self.num_heads, self.head_dim)
-
+        query, key, value = _gpt2_project_qkv(self, hidden_states)
         batch_size = hidden_states.size(0)
         key = torch.cat((self.k_bias.expand(batch_size, -1, -1, -1), key), dim=2)
         value = torch.cat((self.v_bias.expand(batch_size, -1, -1, -1), value), dim=2)
 
-        seq_len = key.size(-2)
         query_len = query.size(-2)
+        seq_len = key.size(-2)
         causal = torch.ones(
             query_len, seq_len, dtype=torch.bool, device=hidden_states.device
         ).tril(diagonal=seq_len - query_len)
@@ -512,26 +537,13 @@ class GPT2AttentionWithKVBiasAndCAScale(GPT2Attention):
         if attention_mask is not None:
             attn_mask = attn_mask + attention_mask
 
-        if layer_past is not None:
-            past_key, past_value = layer_past
-            key = torch.cat((past_key, key), dim=-2)
-            value = torch.cat((past_value, value), dim=-2)
-
-        present = (key, value) if use_cache else None
-        attn_output, attn_weights = self._attn(query, key, value, attn_mask, head_mask)
-
+        attn_output, attn_weights = _gpt2_eager_attention(self, query, key, value, attn_mask)
         s_c = 2.0 * self.context_scale(hidden_states)
-        s_c = s_c.permute(0, 2, 1).unsqueeze(-1)
-        attn_output = attn_output * s_c
-
-        attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
-        attn_output = self.c_proj(attn_output)
-        attn_output = self.resid_dropout(attn_output)
-
-        outputs = (attn_output, present)
+        attn_output = attn_output * s_c.permute(0, 2, 1).unsqueeze(-1)
+        attn_output = _gpt2_finish_attention(self, attn_output)
         if output_attentions:
-            outputs += (attn_weights,)
-        return outputs
+            return attn_output, attn_weights
+        return attn_output, None
 
 
 class GPT2AttentionWithCAScale(GPT2Attention):
@@ -546,45 +558,26 @@ class GPT2AttentionWithCAScale(GPT2Attention):
 
     def forward(
         self,
-        hidden_states: Optional[Tuple[Tensor]] = None,
-        layer_past: Optional[Tuple[Tensor, Tensor]] = None,
+        hidden_states: Any = None,
+        past_key_values: Any = None,
         attention_mask: Optional[Tensor] = None,
-        head_mask: Optional[Tensor] = None,
         encoder_hidden_states: Optional[Tensor] = None,
         encoder_attention_mask: Optional[Tensor] = None,
         use_cache: bool = False,
         output_attentions: bool = False,
         **kwargs: Any,
-    ) -> Union[Tuple[Tensor, ...], Tuple[Tensor, Tuple[Tensor, Tensor], Tensor]]:
-        if hidden_states is None and len(kwargs) == 1:
-            hidden_states = next(iter(kwargs.values()))
-        assert encoder_hidden_states is None
+    ) -> tuple[Tensor, Optional[Tensor]]:
+        del past_key_values, encoder_hidden_states, encoder_attention_mask, use_cache
+        hidden_states = _resolve_hidden_states(hidden_states, kwargs)
 
-        query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
-        query = self._split_heads(query, self.num_heads, self.head_dim)
-        key = self._split_heads(key, self.num_heads, self.head_dim)
-        value = self._split_heads(value, self.num_heads, self.head_dim)
-
-        if layer_past is not None:
-            past_key, past_value = layer_past
-            key = torch.cat((past_key, key), dim=-2)
-            value = torch.cat((past_value, value), dim=-2)
-
-        present = (key, value) if use_cache else None
-        attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
-
+        query, key, value = _gpt2_project_qkv(self, hidden_states)
+        attn_output, attn_weights = _gpt2_eager_attention(self, query, key, value, attention_mask)
         s_c = 2.0 * self.context_scale(hidden_states)
-        s_c = s_c.permute(0, 2, 1).unsqueeze(-1)
-        attn_output = attn_output * s_c
-
-        attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
-        attn_output = self.c_proj(attn_output)
-        attn_output = self.resid_dropout(attn_output)
-
-        outputs = (attn_output, present)
+        attn_output = attn_output * s_c.permute(0, 2, 1).unsqueeze(-1)
+        attn_output = _gpt2_finish_attention(self, attn_output)
         if output_attentions:
-            outputs += (attn_weights,)
-        return outputs
+            return attn_output, attn_weights
+        return attn_output, None
 
 
 def set_attention_linear_bias(model: GPT2LMHeadModel, enabled: bool) -> None:
