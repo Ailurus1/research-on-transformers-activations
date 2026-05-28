@@ -404,7 +404,6 @@ class TrainParamsTrainer(Trainer):
         metric_key_prefix: str = "eval",
         **kwargs: Any,
     ):
-        # Use the same sliding-window recipe as final test eval (not fixed-block CE).
         model = self._unwrap_model()
         device = self.args.device
         if not isinstance(device, torch.device):
