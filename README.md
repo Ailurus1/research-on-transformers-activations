@@ -8,8 +8,6 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-### 3) Hugging Face login
-
 Some models/datasets require authenticated access.
 
 ```bash
